@@ -32,6 +32,16 @@
 #     Contents/Frameworks/libapple.dylib                 arm64 + arm64e, no Intel
 #     Contents/Frameworks/libthin.dylib                  arm64 only, not universal
 #   bundles/Multi.framework           Versions/A (Current) and Versions/B, each signed
+#   bundles/Electron.app              the layout of a universal Electron app:
+#     Contents/MacOS/Electron                            main executable
+#     Contents/Frameworks/Electron Framework.framework   cdhash; inside its own seal:
+#       Versions/A/Electron Framework                      absent (framework binary)
+#       Versions/A/Helpers/chrome_crashpad_handler         cdhash
+#       Versions/A/Libraries/libEGL.dylib (and others)     hash2: not a nested-code location
+#       Libraries, Helpers, ... at the top level           symlinks into Versions/Current
+#     Contents/Frameworks/Electron Helper*.app           cdhash, four helper apps
+#     Contents/Helpers/native-host                       cdhash
+#     Contents/Resources/app.asar.unpacked/.../*.node    hash2; plus single-arch prebuilds
 #
 # Every source carries 64 KiB of initialised data so each slice is larger than
 # lipo's 16 KiB alignment padding; otherwise removing a slice saves nothing.
@@ -225,5 +235,62 @@ codesign --verify --deep --strict --all-architectures "$APP"
 # requirement names exact cdhashes, which only the Current version matches.
 
 framework "$OUT/bundles/Multi.framework" dev.thinner.fixture.multi B A
+
+# --- Electron.app -------------------------------------------------------------
+# Electron Framework keeps dylibs in Versions/A/Libraries. That is not a
+# nested-code location, so the framework's own seal covers them as data (hash2)
+# even though the app seals the framework itself by cdhash. Only a classifier
+# that walks the whole seal chain skips them.
+
+APP="$OUT/bundles/Electron.app"
+C="$APP/Contents"
+mkdir -p "$C/MacOS" "$C/Frameworks" "$C/Helpers" "$C/Resources"
+
+exe "$C/MacOS/Electron" arm64 x86_64
+plist "$C/Info.plist" dev.thinner.fixture.electron Electron APPL
+
+EF="$C/Frameworks/Electron Framework.framework"
+V="$EF/Versions/A"
+mkdir -p "$V/Resources" "$V/Libraries" "$V/Helpers"
+dylib "$V/Electron Framework" "@rpath/Electron Framework.framework/Electron Framework" arm64 x86_64
+plist "$V/Resources/Info.plist" dev.thinner.fixture.electron.framework "Electron Framework" FMWK
+for lib in libEGL libGLESv2 libffmpeg; do
+  dylib "$V/Libraries/$lib.dylib" "@rpath/$lib.dylib" arm64 x86_64
+  codesign --sign - "$V/Libraries/$lib.dylib"
+done
+exe "$V/Helpers/chrome_crashpad_handler" arm64 x86_64
+codesign --sign - "$V/Helpers/chrome_crashpad_handler"
+codesign --sign - "$V"
+ln -s A "$EF/Versions/Current"
+for link in "Electron Framework" Resources Libraries Helpers; do
+  ln -s "Versions/Current/$link" "$EF/$link"
+done
+
+i=0
+for kind in "" " (GPU)" " (Renderer)" " (Plugin)"; do
+  name="Electron Helper$kind"
+  H="$C/Frameworks/$name.app"
+  mkdir -p "$H/Contents/MacOS"
+  exe "$H/Contents/MacOS/$name" arm64 x86_64
+  plist "$H/Contents/Info.plist" "dev.thinner.fixture.electron.helper$i" "$name" APPL
+  codesign --sign - "$H"
+  i=$((i + 1))
+done
+
+exe "$C/Helpers/native-host" arm64 x86_64
+codesign --sign - "$C/Helpers/native-host"
+
+printf 'stands in for an asar archive\n' > "$C/Resources/app.asar"
+U="$C/Resources/app.asar.unpacked/node_modules"
+mkdir -p "$U/native/build/Release" "$U/pty/prebuilds/darwin-arm64" "$U/pty/prebuilds/darwin-x64"
+clang -arch arm64 -arch x86_64 $MIN -bundle "$SRC/lib.c" -o "$U/native/build/Release/native.node"
+clang -arch arm64 $MIN -bundle "$SRC/lib.c" -o "$U/pty/prebuilds/darwin-arm64/pty.node"
+clang -arch x86_64 $MIN -bundle "$SRC/lib.c" -o "$U/pty/prebuilds/darwin-x64/pty.node"
+for node in "$U/native/build/Release/native.node" "$U"/pty/prebuilds/*/pty.node; do
+  codesign --sign - "$node"
+done
+
+codesign --sign - "$APP"
+codesign --verify --deep --strict --all-architectures "$APP"
 
 echo "fixtures written to $OUT"
