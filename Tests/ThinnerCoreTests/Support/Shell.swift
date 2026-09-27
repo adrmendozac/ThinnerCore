@@ -16,6 +16,10 @@ enum Shell {
     }
 
     static func run(_ executable: String, _ arguments: String...) throws -> Result {
+        try run(executable, arguments: arguments)
+    }
+
+    static func run(_ executable: String, arguments: [String]) throws -> Result {
         let process = Process()
         process.executableURL = URL(filePath: executable)
         process.arguments = arguments
