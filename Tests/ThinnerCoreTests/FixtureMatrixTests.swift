@@ -34,12 +34,15 @@ import Testing
         .init(path: "\(electronFramework)/Versions/A/Helpers/chrome_crashpad_handler", magic: fat, archs: ["arm64", "x86_64"]),
         .init(path: "bundles/Electron.app/Contents/Frameworks/Electron Helper (GPU).app/Contents/MacOS/Electron Helper (GPU)", magic: fat, archs: ["arm64", "x86_64"]),
         .init(path: "bundles/Electron.app/Contents/Helpers/native-host", magic: fat, archs: ["arm64", "x86_64"]),
+        .init(path: "\(squirrel)/Versions/A/Squirrel", magic: fat, archs: ["arm64", "x86_64"]),
+        .init(path: "\(squirrel)/Versions/A/Resources/ShipIt", magic: fat, archs: ["arm64", "x86_64"]),
         .init(path: "\(electronModules)/native/build/Release/native.node", magic: fat, archs: ["arm64", "x86_64"]),
         .init(path: "\(electronModules)/pty/prebuilds/darwin-arm64/pty.node", magic: thin64, archs: ["arm64"]),
         .init(path: "\(electronModules)/pty/prebuilds/darwin-x64/pty.node", magic: thin64, archs: ["x86_64"]),
     ]
 
     static let electronFramework = "bundles/Electron.app/Contents/Frameworks/Electron Framework.framework"
+    static let squirrel = "bundles/Electron.app/Contents/Frameworks/Squirrel.framework"
     static let electronModules = "bundles/Electron.app/Contents/Resources/app.asar.unpacked/node_modules"
 
     @Test(arguments: machOCases)

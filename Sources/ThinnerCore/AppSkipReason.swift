@@ -1,0 +1,57 @@
+/// Why a whole app is left alone, whatever its files' decisions.
+public enum AppSkipReason: Hashable, Sendable, CustomStringConvertible {
+    /// Under `/System`, on the sealed system volume, or on a read-only volume.
+    case protectedLocation(String)
+    /// The app is, or is inside, a path the user excluded.
+    case excluded(String)
+    /// A path the user excluded is inside the app. The whole app is skipped:
+    /// excluding more than asked is safe, less is not.
+    case containsExclusion(String)
+    /// `Info.plist` or the main executable cannot be read or trusted.
+    case bundleMetadata(String)
+    /// The main executable is not a Mach-O binary. macOS may run such apps
+    /// under Rosetta, so no code in them is thinned.
+    case scriptOnly(String)
+    /// The user set "Open using Rosetta" for this app. A user choice, with the
+    /// standing of an exclusion.
+    case rosettaFlagged(user: String)
+    /// The "Open using Rosetta" setting could not be read, so it may be set.
+    case rosettaInconclusive(String)
+    /// `LSArchitecturePriority` in `Info.plist` lists an Intel architecture
+    /// first. Unverified whether such apps still launch arm64; skip until a
+    /// fixture proves it.
+    case intelArchitecturePriority([String])
+    /// `codesign --verify --deep --strict --all-architectures` rejects the app
+    /// as it is. Thinning must start from a valid signature.
+    case signatureInvalid(String)
+
+    /// A stable identifier for reports. Never changes once published.
+    public var code: String {
+        switch self {
+        case .protectedLocation: "protectedLocation"
+        case .excluded: "excluded"
+        case .containsExclusion: "containsExclusion"
+        case .bundleMetadata: "bundleMetadata"
+        case .scriptOnly: "scriptOnly"
+        case .rosettaFlagged: "rosettaFlagged"
+        case .rosettaInconclusive: "rosettaInconclusive"
+        case .intelArchitecturePriority: "intelArchitecturePriority"
+        case .signatureInvalid: "signatureInvalid"
+        }
+    }
+
+    public var description: String {
+        switch self {
+        case let .protectedLocation(detail): "protected location: \(detail)"
+        case let .excluded(path): "excluded by the user (\(path))"
+        case let .containsExclusion(path): "contains a path excluded by the user (\(path))"
+        case let .bundleMetadata(detail): "bundle metadata missing or unreadable: \(detail)"
+        case let .scriptOnly(detail): "no executable binary (script-only app): \(detail)"
+        case let .rosettaFlagged(user): "set to Open using Rosetta in \(user)'s preferences"
+        case let .rosettaInconclusive(detail): "cannot tell whether it is set to Open using Rosetta: \(detail)"
+        case let .intelArchitecturePriority(archs):
+            "LSArchitecturePriority lists an Intel architecture first (\(archs.joined(separator: ", ")))"
+        case let .signatureInvalid(detail): "fails code signature verification: \(detail)"
+        }
+    }
+}

@@ -40,6 +40,9 @@
 #       Versions/A/Libraries/libEGL.dylib (and others)     hash2: not a nested-code location
 #       Libraries, Helpers, ... at the top level           symlinks into Versions/Current
 #     Contents/Frameworks/Electron Helper*.app           cdhash, four helper apps
+#     Contents/Frameworks/Squirrel.framework             cdhash; inside its own seal:
+#       Versions/A/Squirrel                                absent (framework binary)
+#       Versions/A/Resources/ShipIt                        hash2: signed, but in Resources
 #     Contents/Helpers/native-host                       cdhash
 #     Contents/Resources/app.asar.unpacked/.../*.node    hash2; plus single-arch prebuilds
 #
@@ -275,6 +278,22 @@ for kind in "" " (GPU)" " (Renderer)" " (Plugin)"; do
   plist "$H/Contents/Info.plist" "dev.thinner.fixture.electron.helper$i" "$name" APPL
   codesign --sign - "$H"
   i=$((i + 1))
+done
+
+# Squirrel, Electron's macOS auto-updater, ships its ShipIt helper inside the
+# framework's Resources. Resources is not a nested-code location, so the
+# framework's own seal covers ShipIt as data even though ShipIt is signed.
+SQ="$C/Frameworks/Squirrel.framework"
+V="$SQ/Versions/A"
+mkdir -p "$V/Resources"
+dylib "$V/Squirrel" "@rpath/Squirrel.framework/Versions/A/Squirrel" arm64 x86_64
+plist "$V/Resources/Info.plist" dev.thinner.fixture.squirrel Squirrel FMWK
+exe "$V/Resources/ShipIt" arm64 x86_64
+codesign --sign - "$V/Resources/ShipIt"
+codesign --sign - "$V"
+ln -s A "$SQ/Versions/Current"
+for link in Squirrel Resources; do
+  ln -s "Versions/Current/$link" "$SQ/$link"
 done
 
 exe "$C/Helpers/native-host" arm64 x86_64

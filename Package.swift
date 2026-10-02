@@ -21,6 +21,7 @@ let package = Package(
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ]
         ),
-        .testTarget(name: "ThinnerCoreTests", dependencies: ["ThinnerCore"]),
+        // Depends on the CLI so the tests can run the built binary.
+        .testTarget(name: "ThinnerCoreTests", dependencies: ["ThinnerCore", "thinner"]),
     ]
 )
