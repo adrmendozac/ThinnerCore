@@ -209,7 +209,7 @@ public enum RestoreOperation {
                 result.outcome = .recoveryFailed("original files are present, but restored app verification failed: \(problem)")
                 return result
             }
-            try closeUnfinishedRecords(sets)
+            result.notes += closeUnfinishedRecords(sets)
             result.outcome = .nothingToRestore("every thinned file already holds its original")
             return result
         }
@@ -287,9 +287,16 @@ public enum RestoreOperation {
             return result
         }
         env.boundary("restore-verified", "")
-        try finish(&records, sets, .restored, nil)
+        // The app is restored and verified: failing to record that must not
+        // be reported as a failed restore. A record left in progress is
+        // finished by closeUnfinishedRecords now, or by the next run.
+        do {
+            try finish(&records, sets, .restored, nil)
+        } catch {
+            result.notes.append("every file is restored and the app verifies, but this run's restore record could not be updated: \(error.description)")
+        }
         // Sets with nothing left to swap got no new record this run.
-        try closeUnfinishedRecords(sets)
+        result.notes += closeUnfinishedRecords(sets)
         env.boundary("restore-committed", "")
         return result
     }
@@ -461,34 +468,46 @@ public enum RestoreOperation {
     /// After a retry verifies the app with every file original, finish any
     /// record an earlier run left in progress or pending, so the history does
     /// not show unfinished work. Failed and refused records stay as they were.
-    private static func closeUnfinishedRecords(_ sets: [BackupSet]) throws(Problem) {
+    /// Runs only after the restore succeeded, so a record it cannot finish
+    /// becomes a note, never a failure; each set is tried independently.
+    private static func closeUnfinishedRecords(_ sets: [BackupSet]) -> [String] {
+        var notes: [String] = []
+        for set in sets {
+            do {
+                try closeUnfinishedRecord(in: set)
+            } catch {
+                notes.append("the app is restored and verifies, but an earlier restore record in \(set.staging.path) could not be marked finished: \(error.description)")
+            }
+        }
+        return notes
+    }
+
+    private static func closeUnfinishedRecord(in set: BackupSet) throws(Problem) {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        for set in sets {
-            let tree = try FileTree(set.staging)
-            guard let kind = try tree.kind([RestoreRecord.fileName]) else { continue }
-            guard kind == .regular else {
-                throw Problem("the restore record in \(set.staging.path) is not a regular file")
-            }
-            var record: RestoreRecord
-            do {
-                record = try JSONDecoder().decode(RestoreRecord.self, from: tree.read([RestoreRecord.fileName], limit: 16 << 20))
-            } catch {
-                throw Problem("cannot read the restore record in \(set.staging.path): \(error)")
-            }
-            guard record.state == .inProgress || record.state == .pending else { continue }
-            record.state = .restored
-            record.reason = "finished by a later restore run that found every file original and the app verified"
-            record.finishedAt = ISO8601DateFormatter().string(from: Date())
-            for i in record.files.indices { record.files[i].state = .restored }
-            let data: Data
-            do {
-                data = try encoder.encode(record)
-            } catch {
-                throw Problem("cannot encode the restore record: \(error.localizedDescription)")
-            }
-            try durablyWrite(data, to: set.staging.appending(path: RestoreRecord.fileName))
+        let tree = try FileTree(set.staging)
+        guard let kind = try tree.kind([RestoreRecord.fileName]) else { return }
+        guard kind == .regular else {
+            throw Problem("the restore record in \(set.staging.path) is not a regular file")
         }
+        var record: RestoreRecord
+        do {
+            record = try JSONDecoder().decode(RestoreRecord.self, from: tree.read([RestoreRecord.fileName], limit: 16 << 20))
+        } catch {
+            throw Problem("cannot read the restore record in \(set.staging.path): \(error)")
+        }
+        guard record.state == .inProgress || record.state == .pending else { return }
+        record.state = .restored
+        record.reason = "finished by a later restore run that found every file original and the app verified"
+        record.finishedAt = ISO8601DateFormatter().string(from: Date())
+        for i in record.files.indices { record.files[i].state = .restored }
+        let data: Data
+        do {
+            data = try encoder.encode(record)
+        } catch {
+            throw Problem("cannot encode the restore record: \(error.localizedDescription)")
+        }
+        try durablyWrite(data, to: set.staging.appending(path: RestoreRecord.fileName))
     }
 
     private static func persistRecords(_ records: [RestoreRecord], _ sets: [BackupSet]) throws(Problem) {

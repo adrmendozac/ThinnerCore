@@ -166,6 +166,25 @@ private var idle: RestoreOperation.Environment {
         #expect(Set(again.alreadyOriginal) == Set(copy.entries.map(\.relativePath)))
     }
 
+    /// Regression: after the app was restored and verified, an earlier
+    /// record that could not be read turned the result into a refusal.
+    @Test func unreadableOlderRecordDoesNotFailACompletedRestore() throws {
+        let copy = try ThinnedCopy()
+        defer { copy.remove() }
+        #expect(RestoreOperation.restoreUnreleased(copy.app, environment: idle).outcome == .restored)
+        let record = copy.staging.appending(path: "restore.json")
+        try Data("not json".utf8).write(to: record)
+
+        let again = RestoreOperation.restoreUnreleased(copy.app, environment: idle)
+        guard case .nothingToRestore = again.outcome else {
+            Issue.record("expected nothing to restore, got \(again.outcome)")
+            return
+        }
+        #expect(again.notes.contains { $0.contains("could not be marked finished") })
+        #expect(try Data(contentsOf: record) == Data("not json".utf8), "an unreadable record is left as it was")
+        #expect(try copy.entries.allSatisfy { try copy.hash($0.relativePath) == $0.originalHash })
+    }
+
     @Test func thinningLeavesAppIdentityUnchanged() throws {
         let copy = try ThinnedCopy()
         defer { copy.remove() }
