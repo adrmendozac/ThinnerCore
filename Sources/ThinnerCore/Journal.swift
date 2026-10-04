@@ -29,6 +29,13 @@ struct Journal: Codable, Sendable {
     /// whose identity differs from the app on disk. Encoded under
     /// `AppIdentity.journalKey`.
     var appIdentity: AppIdentity? = nil
+    /// Every file the operation set out to thin, recorded before the first
+    /// backup. Entries are added only as the writer reaches each file, so
+    /// without this a crash between files would leave a journal whose every
+    /// entry is swapped although later files were never processed. Recovery
+    /// commits only when each planned file has an entry; nil (a journal from
+    /// before this field) cannot prove that, so it rolls back.
+    var plannedFiles: [String]? = nil
 
     enum OperationState: String, Codable, Sendable {
         case inProgress

@@ -118,7 +118,11 @@ public enum ThinOperation {
             bundlePath: real,
             bundleIdentifier: identity.bundleIdentifier,
             startedAt: ISO8601DateFormatter().string(from: Date()),
-            appIdentity: identity
+            appIdentity: identity,
+            plannedFiles: eligibleFiles.compactMap {
+                if case .eligible = $0.decision { return $0.relativePath }
+                return nil
+            }
         )
         try journal.persist(to: staging.journalPath)
         env.boundary("operation-journal", "")
@@ -438,12 +442,16 @@ public enum ThinOperation {
             try journal.persist(to: journalPath)
             return .rolledBack(reason: "the interrupted operation had not replaced any file")
         }
-        // The writer stopped part way through. Committing would report the
-        // files it never reached as done and leave nothing to resume, so put
-        // the replaced ones back and let the user rerun the operation.
-        guard untouched.isEmpty else {
+        // The writer stopped part way through: some entries still hold their
+        // original, or some planned files never got an entry. Committing
+        // would report files it never reached as done and leave nothing to
+        // resume, so put the replaced ones back and let the user rerun it.
+        let planned = journal.plannedFiles.map(Set.init)
+        let reachedAll = planned == Set(journal.entries.map(\.relativePath))
+        guard untouched.isEmpty, reachedAll else {
+            let of = planned.map { "\($0.count) planned" } ?? "an unrecorded number of"
             return rollback(&journal, journalPath: journalPath, bundle: bundle, env: env,
-                            reason: "the interrupted operation replaced \(swapped.count) of \(journal.entries.count) files; rolled back so it can be rerun")
+                            reason: "the interrupted operation replaced \(swapped.count) of \(of) files; rolled back so it can be rerun")
         }
         if env.verify(bundle) == nil {
             for i in swapped { journal.entries[i].state = .committed }

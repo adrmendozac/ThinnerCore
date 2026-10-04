@@ -122,17 +122,29 @@ public enum BundleUsage {
         }
     }
 
-    /// Every regular file under `root`, by identity, never following a symlink.
+    /// Every regular file under `root`, by identity, never following a
+    /// symlink. A directory that cannot be listed throws: its files could be
+    /// in use through a hard link outside the bundle, so a partial set would
+    /// let the scan call the app idle.
     static func fileIDs(under root: String) throws(Problem) -> Set<FileKey> {
-        guard let walker = FileManager.default.enumerator(atPath: root) else {
-            throw Problem("cannot list \(root)")
-        }
+        let tree = try FileTree(URL(filePath: root))
         var ids = Set<FileKey>()
-        while let relative = walker.nextObject() as? String {
-            var info = stat()
-            guard lstat(root + "/" + relative, &info) == 0, info.st_mode & S_IFMT == S_IFREG else { continue }
-            ids.insert(FileKey(device: UInt64(UInt32(bitPattern: info.st_dev)), inode: UInt64(info.st_ino)))
+        func walk(_ path: [String]) throws(Problem) {
+            for entry in try tree.entries(path) {
+                let child = path + [entry.name]
+                switch entry.kind {
+                case .directory:
+                    try walk(child)
+                case .regular:
+                    // Removed since the listing: nothing left to be in use.
+                    guard let info = try tree.status(child), info.st_mode & S_IFMT == S_IFREG else { continue }
+                    ids.insert(FileKey(device: UInt64(UInt32(bitPattern: info.st_dev)), inode: UInt64(info.st_ino)))
+                default:
+                    continue
+                }
+            }
         }
+        try walk([])
         return ids
     }
 

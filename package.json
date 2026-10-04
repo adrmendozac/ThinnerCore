@@ -1,0 +1,19 @@
+{
+  "dependencies": {
+    "ink": "^8.0.0",
+    "react": "^19.3.0"
+  },
+  "name": "thinnercore",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "thinnercore": "bin/thinnercore.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node bin/thinnercore.mjs",
+    "test:ui": "node --test tests-ui/*.test.mjs"
+  }
+}

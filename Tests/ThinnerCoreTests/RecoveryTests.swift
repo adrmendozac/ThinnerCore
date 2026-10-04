@@ -72,6 +72,43 @@ func verifyFailing(on failing: Set<Int>) -> (URL) -> String? {
         #expect(try journalState(copy) == "rolledBack")
     }
 
+    /// Regression: the writer adds an entry only when it reaches a file, so a
+    /// crash between files left a journal whose every entry was swapped, and
+    /// recovery committed although later files were never thinned.
+    @Test func rollsBackWhenPlannedFilesNeverGotAnEntry() throws {
+        let copy = try ThinnedCopy()
+        defer { copy.remove() }
+        try interrupted(copy)
+        try copy.editJournal { $0["plannedFiles"] = copy.entries.map(\.relativePath) + ["Contents/Frameworks/Unreached.dylib"] }
+
+        let outcome = ThinOperation.recoverUnreleased(copy.app, environment: idleEnvironment)
+        guard case .rolledBack(let reason) = outcome else {
+            Issue.record("expected rolledBack, got \(outcome)")
+            return
+        }
+        #expect(reason.contains("of \(copy.entries.count + 1) planned"))
+        for entry in copy.entries {
+            #expect(try copy.hash(entry.relativePath) == entry.originalHash)
+            #expect(try SHA256.hash(file: entry.backupPath) == entry.originalHash, "the backup survives")
+        }
+        #expect(try journalState(copy) == "rolledBack")
+    }
+
+    /// A journal without a recorded plan cannot prove every file was reached.
+    @Test func rollsBackAJournalWithoutAPlan() throws {
+        let copy = try ThinnedCopy()
+        defer { copy.remove() }
+        try interrupted(copy)
+        try copy.editJournal { $0["plannedFiles"] = nil }
+
+        let outcome = ThinOperation.recoverUnreleased(copy.app, environment: idleEnvironment)
+        guard case .rolledBack = outcome else {
+            Issue.record("expected rolledBack, got \(outcome)")
+            return
+        }
+        #expect(try copy.entries.allSatisfy { try copy.hash($0.relativePath) == $0.originalHash })
+    }
+
     /// Regression: rollback renamed each backup into the app, consuming it.
     @Test func rollsBackByCloningAndKeepsEveryBackup() throws {
         let copy = try ThinnedCopy()

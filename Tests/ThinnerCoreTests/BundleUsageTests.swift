@@ -22,8 +22,13 @@ import Testing
 
     @Test func findsNothingWhenUnused() throws {
         defer { remove() }
-        let result = try BundleUsage.scan(bundle)
-        #expect(result.uses.isEmpty)
+        // A process a parallel test is spawning briefly holds copies of this
+        // process's close-on-exec descriptors, which can include the scan's
+        // own walk of the bundle; it is gone by the next scan. A real use
+        // would persist, so rescan a few times before calling it a use.
+        var result = try BundleUsage.scan(bundle)
+        for _ in 0..<3 where !result.uses.isEmpty { result = try BundleUsage.scan(bundle) }
+        #expect(result.uses.isEmpty, "\(result.uses)")
         #expect(result.inspected > 0)
     }
 
@@ -54,6 +59,21 @@ import Testing
         #expect(BundleUsage.regions(1, BundleUsage.Matcher(bundle: bundle.path, files: [])) == .unreadable)
         #expect(BundleUsage.openFiles(1, BundleUsage.Matcher(bundle: bundle.path, files: [])) == .unreadable)
         #expect(try BundleUsage.scan(bundle).uninspectable > 0)
+    }
+
+    /// Regression: the identity walk skipped directories it could not list,
+    /// so a file in one, in use through an outside hard link, went unseen.
+    @Test func refusesABundleItCannotFullyList() throws {
+        let locked = bundle.appending(path: "Contents/Locked")
+        defer {
+            chmod(locked.path, 0o755)
+            remove()
+        }
+        try FileManager.default.createDirectory(at: locked, withIntermediateDirectories: false)
+        try Data("x".utf8).write(to: locked.appending(path: "lib.dylib"))
+        try #require(chmod(locked.path, 0o000) == 0)
+        try #require(getuid() != 0, "root can list anything; this test needs a normal user")
+        #expect(throws: Problem.self) { try BundleUsage.scan(bundle) }
     }
 
     @Test func findsAnExecutableInsideTheBundle() throws {

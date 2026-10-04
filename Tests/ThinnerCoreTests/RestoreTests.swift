@@ -55,6 +55,7 @@ struct ThinnedCopy {
                               startedAt: ISO8601DateFormatter().string(from: Date()))
         journal.state = .committed
         journal.entries = entries
+        journal.plannedFiles = entries.map(\.relativePath)
         var object = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(journal)) as? [String: Any])
         if recordIdentity {
             object[AppIdentity.journalKey] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(identity))

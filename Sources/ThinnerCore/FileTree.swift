@@ -44,6 +44,12 @@ final class FileTree {
 
     /// The kind of the entry at `path`, or nil if nothing is there.
     func kind(_ path: [String]) throws(Problem) -> Kind? {
+        try status(path).map { Kind(mode: $0.st_mode) }
+    }
+
+    /// `lstat` of the entry at `path`, never following a symlink anywhere in
+    /// it, or nil if nothing is there.
+    func status(_ path: [String]) throws(Problem) -> stat? {
         var info = stat()
         let found: Bool? = try withParent(of: path, missing: nil) { parent, name in
             fstatat(parent, name, &info, AT_SYMLINK_NOFOLLOW) == 0
@@ -53,7 +59,7 @@ final class FileTree {
             if errno == ENOENT { return nil }
             throw failure(path)
         }
-        return Kind(mode: info.st_mode)
+        return info
     }
 
     /// The entries of the directory at `path` (empty for the root), sorted by
