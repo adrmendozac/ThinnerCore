@@ -1,10 +1,10 @@
 import Foundation
 
 /// Something the scan could not read or trust, described for the report.
-struct Problem: Error, Equatable, CustomStringConvertible {
-    let description: String
+public struct Problem: Error, Equatable, CustomStringConvertible, Sendable {
+    public let description: String
 
-    init(_ description: String) {
+    public init(_ description: String) {
         self.description = description
     }
 }

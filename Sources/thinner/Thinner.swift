@@ -8,7 +8,7 @@ struct Thinner: ParsableCommand {
         commandName: "thinner",
         abstract: "Remove Intel (x86_64) slices from Universal Binary apps on Apple Silicon.",
         version: ThinnerCore.version,
-        subcommands: [Scan.self],
+        subcommands: [Scan.self, Restore.self, Recover.self],
         defaultSubcommand: Scan.self
     )
 
@@ -27,6 +27,20 @@ struct Thinner: ParsableCommand {
     }
 }
 
+enum ColorMode: String, ExpressibleByArgument {
+    case auto, always, never
+
+    var enabled: Bool {
+        switch self {
+        case .always: true
+        case .never: false
+        case .auto: isatty(STDOUT_FILENO) != 0
+            && ProcessInfo.processInfo.environment["NO_COLOR"] == nil
+            && ProcessInfo.processInfo.environment["TERM"] != "dumb"
+        }
+    }
+}
+
 struct Scan: ParsableCommand {
     static let configuration = CommandConfiguration(
         abstract: "Report what thinning would remove. Read-only: nothing on disk changes.",
@@ -38,7 +52,7 @@ struct Scan: ParsableCommand {
             any change.
 
             Exit status: 0 for a complete scan, 1 for a scan that failed or could not read \
-            everything, 2 for invalid arguments.
+            everything, 2 for invalid arguments. Mutation requests use 3 for pending recovery and 4 for failed recovery; the highest outcome code wins across apps.
             """
     )
 
@@ -55,8 +69,14 @@ struct Scan: ParsableCommand {
         valueName: "plist"))
     var rosettaPreferences: String?
 
+    @Flag(name: .customLong("apply"), help: "Request thinning (unavailable until safety and restore release gates pass).")
+    var apply = false
+
     @Flag(help: "Print the report as JSON.")
     var json = false
+
+    @Option(help: "Terminal colors: auto, always, or never. JSON is never colored.")
+    var color: ColorMode = .auto
 
     @Flag(name: .shortAndLong, help: "List every universal file with its decision.")
     var verbose = false
@@ -64,7 +84,7 @@ struct Scan: ParsableCommand {
     func validate() throws {
         var info = stat()
         guard lstat(path, &info) == 0 else {
-            throw ValidationError("cannot scan \(path): \(String(cString: strerror(errno)))")
+            throw ValidationError("cannot scan \(PermissionDiagnostic.describe(errno, path: path))")
         }
     }
 
@@ -73,11 +93,17 @@ struct Scan: ParsableCommand {
         let excludes = excludes.map(Self.absolute)
         let progress = ProgressLine()
         let options = ScanOptions(excludes: excludes, launchServicesPreferences: rosettaPreferences.map(Self.absolute))
+        if apply {
+            let report = MutationCommands.apply(root, options: options)
+            print(json ? try report.json() : report.text)
+            if report.exitCode != 0 { throw ExitCode(report.exitCode) }
+            return
+        }
         let result = AppScanner.scan(root, options: options, progress: progress.show)
         progress.clear()
 
         let report = ScanReport(root: root, excludes: excludes, result: result)
-        print(json ? try report.json() : TextReport.render(report, verbose: verbose))
+        print(json ? try report.json() : TextReport.render(report, verbose: verbose, color: color.enabled))
         if !report.complete { throw ExitCode(1) }
     }
 
@@ -94,7 +120,7 @@ final class ProgressLine {
 
     func show(_ app: String) {
         guard enabled else { return }
-        FileHandle.standardError.write(Data("\r\u{1B}[2KScanning \(app)…".utf8))
+        FileHandle.standardError.write(Data("\r\u{1B}[2KScanning \(TerminalText.sanitize(app))…".utf8))
         shown = true
     }
 
@@ -102,4 +128,27 @@ final class ProgressLine {
         guard shown else { return }
         FileHandle.standardError.write(Data("\r\u{1B}[2K".utf8))
     }
+}
+
+/// These commands reserve the stable interface without exposing an unsafe
+/// fallback such as manually copying backup files over a changed app.
+struct Restore: ParsableCommand {
+    static let configuration = CommandConfiguration(abstract: "Restore an app (release gate pending).")
+    @Argument(help: "App to restore.") var path: String
+    @Flag(help: "Print the report as JSON.") var json = false
+    func run() throws { try reportUnavailable("restore", path: path, json: json) }
+}
+
+struct Recover: ParsableCommand {
+    static let configuration = CommandConfiguration(abstract: "Recover interrupted operations (release gate pending).")
+    @Argument(help: "App or directory to recover.") var path: String
+    @Flag(help: "Print the report as JSON.") var json = false
+    func run() throws { try reportUnavailable("recover", path: path, json: json) }
+}
+
+private func reportUnavailable(_ command: String, path: String, json: Bool) throws {
+    let root = URL(filePath: path, relativeTo: URL.currentDirectory()).absoluteURL
+    let report = MutationCommands.unavailable(command, root: root)
+    print(json ? try report.json() : report.text)
+    throw ExitCode(report.exitCode)
 }

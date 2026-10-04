@@ -183,11 +183,15 @@ private let currentUser = String(cString: getpwuid(getuid())!.pointee.pw_name)
         #expect(try app(result, "App.app").skip == nil)
     }
 
-    @Test func openUsingRosettaFlagSkipsThatAppOnly() throws {
+    /// The name macOS 27 writes, and the earlier assumed one.
+    static let rosettaKeys = ["Architectures(arm64)", "LSArchitecturesForX86_64"]
+
+    @Test(arguments: rosettaKeys)
+    func openUsingRosettaFlagSkipsThatAppOnly(key: String) throws {
         defer { cleanUp() }
         try copyApp(to: "Flagged.app")
         try copyApp(to: "Other.app", from: "bundles/Nested.app")
-        try writePrefs(["LSArchitecturesForX86_64": [
+        try writePrefs([key: [
             "dev.thinner.fixture.signed": [Data([1, 2, 3]), "x86_64"],
         ]])
 
@@ -197,21 +201,23 @@ private let currentUser = String(cString: getpwuid(getuid())!.pointee.pw_name)
         #expect(try app(result, "Other.app").skip == nil)
     }
 
-    @Test func unrecognizedRosettaEntryIsInconclusive() throws {
+    @Test(arguments: rosettaKeys)
+    func unrecognizedRosettaEntryIsInconclusive(key: String) throws {
         defer { cleanUp() }
         try copyApp(to: "App.app")
-        try writePrefs(["LSArchitecturesForX86_64": ["dev.thinner.fixture.signed": ["arm64"]]])
+        try writePrefs([key: ["dev.thinner.fixture.signed": ["arm64"]]])
         guard case .rosettaInconclusive = try app(scan(), "App.app").skip else {
             Issue.record("expected rosettaInconclusive")
             return
         }
     }
 
-    @Test func unparseableRosettaKeySkipsEveryApp() throws {
+    @Test(arguments: rosettaKeys)
+    func unparseableRosettaKeySkipsEveryApp(key: String) throws {
         defer { cleanUp() }
         try copyApp(to: "A.app")
         try copyApp(to: "B.app", from: "bundles/Nested.app")
-        try writePrefs(["LSArchitecturesForX86_64": "not a dictionary"])
+        try writePrefs([key: "not a dictionary"])
 
         let result = scan()
         guard case .unreadable = result.rosetta.preferences else {
@@ -225,6 +231,46 @@ private let currentUser = String(cString: getpwuid(getuid())!.pointee.pw_name)
                 continue
             }
         }
+    }
+
+    /// Regression: the scanner read only `LSArchitecturesForX86_64`, so on
+    /// macOS 27 a flagged app was reported eligible. This is the shape Finder
+    /// wrote on macOS 27.0.1 (Phase 0, 2026-10-03): a bookmark to the flagged
+    /// copy, then the architecture, beside unrelated LaunchServices keys.
+    @Test func macOS27RosettaFlagIsRead() throws {
+        defer { cleanUp() }
+        try copyApp(to: "Flagged.app")
+        try copyApp(to: "Other.app", from: "bundles/Nested.app")
+        let bookmark = Data("book".utf8) + Data(count: 1036)
+        try writePrefs([
+            "Architectures(arm64)": ["dev.thinner.fixture.signed": [bookmark, "x86_64"]],
+            "LSGameModeDisabledIsPreferred": [String: Any](),
+            "LSSystemHiddenPreferred": [String: Any](),
+        ])
+
+        let result = scan()
+        #expect(result.rosetta.preferences == .read(flagged: 1))
+        #expect(try app(result, "Flagged.app").skip == .rosettaFlagged(user: currentUser))
+        #expect(try app(result, "Other.app").skip == nil)
+    }
+
+    /// Flags under both names are combined; flagged under either is flagged.
+    @Test func rosettaFlagsUnderBothKeysCombine() throws {
+        defer { cleanUp() }
+        try copyApp(to: "A.app")
+        try copyApp(to: "B.app", from: "bundles/Nested.app")
+        try writePrefs([
+            "Architectures(arm64)": ["dev.thinner.fixture.signed": [Data([1]), "x86_64"]],
+            "LSArchitecturesForX86_64": [
+                "dev.thinner.fixture.signed": ["arm64"],
+                "dev.thinner.fixture.nested": [Data([2]), "x86_64"],
+            ],
+        ])
+
+        let result = scan()
+        #expect(result.rosetta.preferences == .read(flagged: 2))
+        #expect(try app(result, "A.app").skip == .rosettaFlagged(user: currentUser))
+        #expect(try app(result, "B.app").skip == .rosettaFlagged(user: currentUser))
     }
 
     @Test func corruptPreferencesFileSkipsEveryApp() throws {

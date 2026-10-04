@@ -3,19 +3,33 @@ import Foundation
 /// The human-readable dry-run report, rendered from the same `ScanReport` as
 /// the JSON.
 public enum TextReport {
-    public static func render(_ report: ScanReport, verbose: Bool = false) -> String {
+    public static func render(_ report: ScanReport, verbose: Bool = false, color: Bool = false) -> String {
         var lines: [String] = []
-        lines.append("\(report.tool.name) \(report.tool.version) — dry run: nothing on disk was changed")
-        lines.append("Scanned \(report.root)")
+        lines.append("\(report.tool.name)  \(report.tool.version)")
+        lines.append("dry run: nothing on disk was changed")
+        lines.append("")
+        lines.append("Path     \(report.root)")
         lines.append(rosetta(report.rosetta))
         for path in report.missingExclusions {
             lines.append("Warning: excluded path not found, so it excludes nothing: \(path)")
         }
 
+        let totals = report.totals
+        let skipped = totals.skippedApps > 0 ? " (\(totals.skippedApps) skipped)" : ""
+        lines.append("")
+        lines.append("OVERVIEW")
+        lines.append("Total: \(count(totals.apps, "app"))\(skipped) · \(count(totals.universalFiles, "universal file"))"
+            + " · \(totals.eligibleFiles) eligible · \(bytes(totals.removableBytes)) estimated removable")
+        lines.append("Estimates are the logical size of the slices removed, not disk space freed.")
+        lines.append("")
+        lines.append("APPLICATIONS")
+        if report.apps.isEmpty { lines.append("  No apps found in the searched paths.") }
         for app in report.apps {
+            let status = app.skip != nil ? "SKIP" : !app.issues.isEmpty ? "CHECK" : app.eligibleFiles > 0 ? "ELIGIBLE" : "NO CHANGE"
             lines.append("")
-            lines.append(app.bundleIdentifier.map { "\(app.path) (\($0))" } ?? app.path)
-            lines += self.app(app, verbose: verbose).map { "  \($0)" }
+            lines.append("  [\(status)] \(app.path)")
+            if verbose, let id = app.bundleIdentifier { lines.append("    \(id)") }
+            lines += self.app(app, verbose: verbose).map { "    \($0)" }
         }
 
         if !report.skippedPaths.isEmpty {
@@ -34,16 +48,34 @@ public enum TextReport {
             lines += unreadable.map { "  \($0): \($1)" }
         }
 
-        let totals = report.totals
+        if !report.pendingOperations.operations.isEmpty || !report.pendingOperations.problems.isEmpty {
+            lines.append("")
+            lines.append("Recovery journal snapshot (unlocked; may be out of date; searched beside the root and discovered apps):")
+            lines += report.pendingOperations.operations.map { "  \($0.bundlePath): \($0.state) — \($0.journalPath)" }
+            lines += report.pendingOperations.problems.map { "  \($0)" }
+            lines.append("No recovery was attempted. Keep all backups.")
+        }
         lines.append("")
-        let skipped = totals.skippedApps > 0 ? " (\(totals.skippedApps) skipped)" : ""
-        lines.append("Total: \(count(totals.apps, "app"))\(skipped) · \(count(totals.universalFiles, "universal file"))"
-            + " · \(totals.eligibleFiles) eligible · \(bytes(totals.removableBytes)) estimated removable")
-        lines.append("Estimates are the logical size of the slices removed, not disk space freed.")
-        if !report.complete {
+        if totals.issues > 0 {
             lines.append("Incomplete scan: \(count(totals.issues, "path")) could not be read; counts are lower bounds.")
         }
-        return lines.joined(separator: "\n")
+        if !report.pendingOperations.problems.isEmpty {
+            lines.append("Journal inspection incomplete: \(count(report.pendingOperations.problems.count, "problem")); see recovery details above.")
+        }
+        if report.complete { lines.append("Scan complete. No files changed.") }
+        if !verbose && !report.apps.isEmpty { lines.append("Use --verbose for file decisions or --json for structured output.") }
+        return lines.map { line in
+            let clean = TerminalText.sanitize(line)
+            guard color else { return clean }
+            let code: String?
+            if line == "OVERVIEW" || line == "APPLICATIONS" || line.hasPrefix(report.tool.name + "  ") { code = "1;36" }
+            else if line.hasPrefix("Total:") { code = "1" }
+            else if line.contains("[ELIGIBLE]") || line == "Scan complete. No files changed." { code = "32" }
+            else if line.contains("[SKIP]") || line.contains("[CHECK]") || line.hasPrefix("Warning:") || line.hasPrefix("Incomplete") || line.hasPrefix("Journal inspection") { code = "33" }
+            else if line.contains("[NO CHANGE]") || line.hasPrefix("Use --") || line.hasPrefix("Estimates") { code = "2" }
+            else { code = nil }
+            return code.map { "\u{1B}[\($0)m\(clean)\u{1B}[0m" } ?? clean
+        }.joined(separator: "\n")
     }
 
     private static func app(_ app: ScanReport.App, verbose: Bool) -> [String] {

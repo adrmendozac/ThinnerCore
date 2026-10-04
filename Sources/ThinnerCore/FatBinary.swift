@@ -6,7 +6,6 @@ public struct FatSlice: Equatable, Sendable {
     public let cpuSubtype: Int32
     public let offset: UInt64
     public let size: UInt64
-    /// Alignment as a power of two, as stored in the header.
     public let align: UInt32
 }
 

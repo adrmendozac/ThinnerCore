@@ -14,7 +14,7 @@ import ThinnerCore
         let json = try report.json()
         let decoded = try JSONDecoder().decode(ScanReport.self, from: Data(json.utf8))
         #expect(decoded == report)
-        #expect(decoded.schemaVersion == 1)
+        #expect(decoded.schemaVersion == 2)
         #expect(decoded.dryRun)
         #expect(decoded.complete)
     }

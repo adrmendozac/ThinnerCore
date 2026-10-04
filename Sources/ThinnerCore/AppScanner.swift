@@ -196,6 +196,8 @@ public enum AppScanner {
                 return
             }
             for entry in entries where entry.kind == .directory {
+                // Backup trees are operation storage, never app-discovery roots.
+                if PendingOperations.isStagingName(entry.name) { continue }
                 let child = path + [entry.name]
                 let skip = skipBeforeReading(join(rootReal, child.joined(separator: "/")))
                 if isApp(entry.name) {

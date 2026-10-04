@@ -155,9 +155,9 @@ public enum BundleWalker {
                 }
             }
             // Files with multiple hard links: replacing one path via rename would only
-        // change that name, leaving other paths still pointing at the universal
-        // original. Skip to avoid breaking other references.
-        if case .eligible = decision, info.st_nlink > 1 {
+            // change that name, leaving other paths still pointing at the universal
+            // original. Skip to avoid breaking other references.
+            if case .eligible = decision, info.st_nlink > 1 {
                 decision = .skip(.hardLinked)
             }
         }

@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-import ThinnerCore
+@testable import ThinnerCore
 
 /// Runs the built `thinner` binary. Only ever against fixtures and throwaway
 /// directories, never the default /Applications.
@@ -62,6 +62,50 @@ import ThinnerCore
         let report = try JSONDecoder().decode(ScanReport.self, from: Data(run.output.utf8))
         #expect(report.apps.compactMap(\.skip?.code) == ["excluded", "excluded"])
         #expect(report.excludes.count == 2)
+    }
+
+    @Test func applyIsGatedAndReportsJSON() throws {
+        defer { cleanUp() }
+        let run = try thinner(dir.path, "--apply", "--json")
+        #expect(run.status == 1)
+        let report = try JSONDecoder().decode(MutationReport.self, from: Data(run.output.utf8))
+        #expect(report.command == "apply")
+        #expect(report.problems.contains(MutationCommands.releaseBlock))
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path).isEmpty)
+    }
+
+    @Test func restoreAndRecoverAreGated() throws {
+        defer { cleanUp() }
+        for command in ["restore", "recover"] {
+            let run = try Shell.run(Self.binary.path, command, dir.path, "--json")
+            #expect(run.status == 1)
+            let report = try JSONDecoder().decode(MutationReport.self, from: Data(run.output.utf8))
+            #expect(report.command == command)
+            #expect(report.apps.first?.outcome == .refused)
+        }
+        #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path).isEmpty)
+    }
+
+    @Test func pendingJournalsAreReadOnlyAndDriveMutationExitCodes() throws {
+        defer { cleanUp() }
+        let stage = dir.appending(path: ".thinner-00000000-0000-0000-0000-000000000002")
+        try FileManager.default.createDirectory(at: stage, withIntermediateDirectories: false)
+        let journalURL = stage.appending(path: "journal.json")
+        var journal = Journal(operationID: "test", bundlePath: dir.appending(path: "Gone.app").path,
+                              bundleIdentifier: "fixture", startedAt: "test")
+        for state in [Journal.OperationState.inProgress, .recoveryFailed] {
+            journal.state = state
+            let bytes = try JSONEncoder().encode(journal)
+            try bytes.write(to: journalURL)
+            let scan = try thinner(dir.path, "--json")
+            #expect(scan.status == 0)
+            let report = try JSONDecoder().decode(ScanReport.self, from: Data(scan.output.utf8))
+            #expect(report.pendingOperations.operations.count == 1)
+            let apply = try thinner(dir.path, "--apply", "--json")
+            #expect(apply.status == (state == .recoveryFailed ? 4 : 3))
+            #expect(try Data(contentsOf: journalURL) == bytes)
+            #expect(try FileManager.default.contentsOfDirectory(atPath: stage.path) == ["journal.json"])
+        }
     }
 
     @Test func invalidArgumentsExitTwo() throws {

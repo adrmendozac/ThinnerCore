@@ -24,9 +24,12 @@ public struct RosettaStatus: Equatable, Sendable {
 
 /// The per-app "Open using Rosetta" flags from LaunchServices preferences.
 ///
-/// The flag lives under `LSArchitecturesForX86_64`, keyed by bundle ID. The
-/// key is undocumented, so anything but the expected shape is inconclusive,
-/// never "not flagged".
+/// The flags live in a dictionary keyed by bundle ID; each entry holds a
+/// bookmark to the flagged copy and the architecture to run. macOS 27 names
+/// that dictionary `Architectures(arm64)` (Phase 0, 2026-10-03). The earlier
+/// assumed name `LSArchitecturesForX86_64` is still read, since older versions
+/// are unmeasured. The keys are undocumented, so anything but the expected
+/// shape is inconclusive, never "not flagged".
 struct RosettaFlags {
     enum Flag: Equatable {
         case notFlagged
@@ -34,7 +37,12 @@ struct RosettaFlags {
         case inconclusive(String)
     }
 
-    static let key = "LSArchitecturesForX86_64"
+    static let legacyKey = "LSArchitecturesForX86_64"
+
+    /// `Architectures(<host arch>)`, or the legacy name.
+    static func isFlagKey(_ key: String) -> Bool {
+        key == legacyKey || (key.hasPrefix("Architectures(") && key.hasSuffix(")"))
+    }
 
     let status: RosettaStatus
     private let entries: [String: Flag]?
@@ -66,14 +74,18 @@ struct RosettaFlags {
             guard let root = plist as? [String: Any] else {
                 throw Problem("not a property list dictionary")
             }
-            switch root[Self.key] {
-            case nil:
-                entries = [:]
-            case let apps as [String: Any]:
-                entries = apps.mapValues { Self.mentionsIntel($0) ? .flagged : .inconclusive("its \(Self.key) entry has an unrecognized format") }
-            default:
-                throw Problem("\(Self.key) is not a dictionary")
+            var found: [String: Flag] = [:]
+            for key in root.keys.sorted() where Self.isFlagKey(key) {
+                guard let apps = root[key] as? [String: Any] else {
+                    throw Problem("\(key) is not a dictionary")
+                }
+                for (bundleID, value) in apps {
+                    let flag: Flag = Self.mentionsIntel(value) ? .flagged : .inconclusive("its \(key) entry has an unrecognized format")
+                    // A bundle ID listed under several keys: flagged anywhere is flagged.
+                    if found[bundleID] != .flagged { found[bundleID] = flag }
+                }
             }
+            entries = found
             preferences = .read(flagged: entries?.values.count { $0 == .flagged } ?? 0)
         } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
             entries = [:]
