@@ -7,8 +7,6 @@ struct AppInfo {
     /// `LSArchitecturePriority`, if present.
     let architecturePriority: [String]?
 
-    static let intelNames: Set<String> = ["x86_64", "x86_64h", "i386"]
-
     /// Reads `Contents/Info.plist` without following symlinks.
     init(tree: FileTree) throws(Problem) {
         let data = try tree.read(["Contents", "Info.plist"], limit: 16 << 20)
@@ -31,9 +29,13 @@ struct AppInfo {
         self.executable = executable
     }
 
-    /// True if `LSArchitecturePriority` puts an Intel architecture first.
-    var prefersIntel: Bool {
-        architecturePriority?.first.map(Self.intelNames.contains) ?? false
+    /// The slice `LSArchitecturePriority` selects from the main executable's
+    /// `slices`: the first listed name the executable contains, not merely
+    /// the first listed name. An app listing (arm64e, x86_64) whose
+    /// executable has no arm64e slice launches as x86_64 under Rosetta
+    /// (Phase 0). Nil when the list is absent or names none of the slices.
+    func prioritySelection(from slices: [Arch]) -> Arch? {
+        architecturePriority?.lazy.compactMap { name in slices.first { $0.description == name } }.first
     }
 
     /// Why the main executable is not a Mach-O binary, or nil if it is one.

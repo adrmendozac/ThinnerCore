@@ -297,6 +297,30 @@ private let currentUser = String(cString: getpwuid(getuid())!.pointee.pw_name)
         #expect(try app(result, "Arm.app").skip == nil)
     }
 
+    /// Regression: only the first listed name was checked. LaunchServices
+    /// takes the first listed architecture the executable contains, so
+    /// (arm64e, x86_64) on an arm64 + x86_64 executable runs under Rosetta
+    /// (Phase 0), and thinning would force it native. A list naming none of
+    /// the slices is unmeasured and skips too.
+    @Test func priorityIsResolvedAgainstTheExecutablesSlices() throws {
+        defer { cleanUp() }
+        let priorities: [String: [String]] = [
+            "Arm64e.app": ["arm64e", "x86_64"],
+            "Unmatched.app": ["i386"],
+            "ArmAfterMissing.app": ["arm64e", "arm64", "x86_64"],
+        ]
+        for (name, priority) in priorities {
+            let copy = try copyApp(to: name)
+            try editInfoPlist(copy) { $0["LSArchitecturePriority"] = priority }
+            try resign(copy)
+        }
+
+        let result = scan()
+        #expect(try app(result, "Arm64e.app").skip == .intelArchitecturePriority(["arm64e", "x86_64"]))
+        #expect(try app(result, "Unmatched.app").skip == .intelArchitecturePriority(["i386"]))
+        #expect(try app(result, "ArmAfterMissing.app").skip == nil)
+    }
+
     @Test func malformedArchitecturePriorityIsBundleMetadata() throws {
         defer { cleanUp() }
         let copy = try copyApp(to: "App.app")
@@ -332,6 +356,6 @@ private let currentUser = String(cString: getpwuid(getuid())!.pointee.pw_name)
         #expect(AppSkipReason.rosettaFlagged(user: "sam").description
             == "set to Open using Rosetta in sam's preferences")
         #expect(AppSkipReason.intelArchitecturePriority(["x86_64", "arm64"]).description
-            == "LSArchitecturePriority lists an Intel architecture first (x86_64, arm64)")
+            == "LSArchitecturePriority does not select the arm64 slice (x86_64, arm64)")
     }
 }

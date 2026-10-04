@@ -231,8 +231,12 @@ public enum AppScanner {
                     skip = .rosettaInconclusive(detail)
                 } else if rosetta.flag(for: info.bundleIdentifier) == .flagged {
                     skip = .rosettaFlagged(user: rosetta.status.preferencesUser)
-                } else if info.prefersIntel {
-                    skip = .intelArchitecturePriority(info.architecturePriority ?? [])
+                } else if let priority = info.architecturePriority,
+                          let main = classified.files.first(where: { $0.relativePath == "Contents/MacOS/\(info.executable)" }),
+                          info.prioritySelection(from: main.architectures) != .arm64 {
+                    // Only the ordinary arm64 slice is known to launch natively;
+                    // an unmatched list is unmeasured, so it skips too.
+                    skip = .intelArchitecturePriority(priority)
                 }
             } catch {
                 skip = .bundleMetadata(error.description)

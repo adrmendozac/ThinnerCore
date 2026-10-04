@@ -17,9 +17,11 @@ public enum AppSkipReason: Hashable, Sendable, CustomStringConvertible {
     case rosettaFlagged(user: String)
     /// The "Open using Rosetta" setting could not be read, so it may be set.
     case rosettaInconclusive(String)
-    /// `LSArchitecturePriority` in `Info.plist` lists an Intel architecture
-    /// first. Unverified whether such apps still launch arm64; skip until a
-    /// fixture proves it.
+    /// `LSArchitecturePriority` in `Info.plist` does not select the main
+    /// executable's arm64 slice: the first listed architecture the executable
+    /// contains is Intel (the app runs under Rosetta, Phase 0), another
+    /// non-arm64 slice, or none. Thinning would force native execution, so no
+    /// force option overrides this.
     case intelArchitecturePriority([String])
     /// `codesign --verify --deep --strict --all-architectures` rejects the app
     /// as it is. Thinning must start from a valid signature.
@@ -50,7 +52,7 @@ public enum AppSkipReason: Hashable, Sendable, CustomStringConvertible {
         case let .rosettaFlagged(user): "set to Open using Rosetta in \(user)'s preferences"
         case let .rosettaInconclusive(detail): "cannot tell whether it is set to Open using Rosetta: \(detail)"
         case let .intelArchitecturePriority(archs):
-            "LSArchitecturePriority lists an Intel architecture first (\(archs.joined(separator: ", ")))"
+            "LSArchitecturePriority does not select the arm64 slice (\(archs.joined(separator: ", ")))"
         case let .signatureInvalid(detail): "fails code signature verification: \(detail)"
         }
     }

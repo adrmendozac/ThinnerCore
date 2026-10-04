@@ -363,6 +363,31 @@ every time:
 - `open -W` fails with "kevent() failed: No such process" when the probe
   exits before open starts waiting; the script polls the probe's log instead.
 
+#### arm64-first and unmatched priorities (2026-10-03)
+
+`scripts/phase0/rosetta-check.sh priority <DIR>`, one run, same method:
+
+| App | Slices | codesign | Ran as |
+|---|---|---|---|
+| PriorityArm, `(arm64, x86_64)` | x86_64, arm64 | valid | arm64, not translated |
+| PriorityArm, thinned | arm64 | valid | arm64, not translated |
+| PriorityE, `(arm64e, x86_64)` | x86_64, arm64 | valid | **x86_64, translated** |
+| PriorityE, thinned | arm64 | valid | arm64, not translated |
+
+- **arm64 first is compatible with thinning,** as CLAUDE.md said: the
+  universal app already runs arm64, and the thinned copy runs the same way.
+- **LaunchServices picks the first listed architecture the executable
+  contains, not the first listed.** `arm64e` names no slice here, so
+  `x86_64` wins and the universal app runs under Rosetta. The scanner
+  checked only the first entry, so it would have thinned this app and
+  forced it native. It now resolves the list against the main executable's
+  slices and skips unless the result is the ordinary `arm64` slice. A list
+  naming none of the slices is unmeasured, so it skips too. Regression test:
+  `priorityIsResolvedAgainstTheExecutablesSlices`.
+- Not measured: an executable that has an `arm64e` slice listed first, and
+  case variants of the names (the scanner matches exactly, so a variant
+  skips).
+
 ### Signal 2: the "Open using Rosetta" flag
 
 The owner ticked Open using Rosetta on `Probe.app` in Finder's Get Info.
