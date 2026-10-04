@@ -1,12 +1,12 @@
 # Phase 5 development interface
 
-The CLI accepts `thinner PATH --apply [--json] [--exclude PATH ...]`.
+The CLI accepts `thinnercore PATH --apply [--json] [--exclude PATH ...]`.
 It runs fresh scan policy, the host check, and bundle process inspection.
 Incomplete process visibility refuses the app. Modification remains disabled
 in both the CLI and public library while Phases 0, 4, and 6 are incomplete.
 There is no environment variable or force flag that enables it.
 
-`thinner restore APP --json` and `thinner recover PATH --json` reserve the
+`thinnercore restore APP --json` and `thinnercore recover PATH --json` reserve the
 command/report interfaces; they do not yet restore or recover files.
 
 Mutation JSON schema 1 reports per-app outcomes and run-level problems.

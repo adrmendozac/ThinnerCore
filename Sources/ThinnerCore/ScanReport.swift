@@ -101,7 +101,7 @@ public struct ScanReport: Codable, Equatable, Sendable {
 
     public init(root: URL, excludes: [URL], result: ScanResult) {
         schemaVersion = Self.currentSchemaVersion
-        tool = Tool(name: "thinner", version: ThinnerCore.version)
+        tool = Tool(name: "thinnercore", version: ThinnerCore.version)
         dryRun = true
         self.root = root.path
         pendingOperations = PendingOperations.read(root: root, apps: result.apps.map(\.url))

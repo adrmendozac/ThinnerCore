@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import ThinnerCore
 
-/// Runs the built `thinner` binary. Only ever against fixtures and throwaway
+/// Runs the built `thinnercore` binary. Only ever against fixtures and throwaway
 /// directories, never the default /Applications.
 @Suite struct CLITests {
     /// The CLI builds next to the test bundle.
@@ -10,7 +10,7 @@ import Testing
         let bundle = Bundle.allBundles.first { $0.bundlePath.hasSuffix(".xctest") }
         let products = bundle?.bundleURL.deletingLastPathComponent()
             ?? URL(filePath: #filePath).deletingLastPathComponent().appending(path: "../../.build/debug")
-        return products.appending(path: "thinner")
+        return products.appending(path: "thinnercore")
     }()
 
     private let dir: URL

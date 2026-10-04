@@ -5,7 +5,7 @@ import ThinnerCore
 @main
 struct Thinner: ParsableCommand {
     static let configuration = CommandConfiguration(
-        commandName: "thinner",
+        commandName: "thinnercore",
         abstract: "Remove Intel (x86_64) slices from Universal Binary apps on Apple Silicon.",
         version: ThinnerCore.version,
         subcommands: [Scan.self, Restore.self, Recover.self],

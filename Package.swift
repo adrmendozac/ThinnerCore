@@ -3,10 +3,10 @@
 import PackageDescription
 
 let package = Package(
-    name: "thinner",
+    name: "thinnercore",
     platforms: [.macOS(.v13)],
     products: [
-        .executable(name: "thinner", targets: ["thinner"]),
+        .executable(name: "thinnercore", targets: ["thinner"]),
         .library(name: "ThinnerCore", targets: ["ThinnerCore"]),
     ],
     dependencies: [
