@@ -81,7 +81,7 @@ import ThinnerCore
                          .sealedAsData(by: ""), .unsealed(""), .signatureMetadata("")].map(\.code)
         let appCodes = [AppSkipReason.protectedLocation(""), .excluded(""), .containsExclusion(""), .bundleMetadata(""),
                         .scriptOnly(""), .rosettaFlagged(user: ""), .rosettaInconclusive(""),
-                        .intelArchitecturePriority([]), .signatureInvalid("")].map(\.code)
+                        .noNativeMainExecutable([]), .intelArchitecturePriority([]), .signatureInvalid("")].map(\.code)
         #expect(Set(fileCodes).count == fileCodes.count)
         #expect(Set(appCodes).count == appCodes.count)
     }

@@ -321,6 +321,31 @@ private let currentUser = String(cString: getpwuid(getuid())!.pointee.pw_name)
         #expect(try app(result, "ArmAfterMissing.app").skip == nil)
     }
 
+    /// Regression: the walker lists only universal files, so a thin Intel
+    /// main executable was invisible to the app checks, and an app running
+    /// entirely under Rosetta still offered its universal frameworks for
+    /// thinning, with or without an Intel-first priority.
+    @Test func thinIntelMainExecutableIsSkipped() throws {
+        defer { cleanUp() }
+        for (name, priority) in [("Thin.app", nil), ("ThinPriority.app", ["x86_64", "arm64"])] as [(String, [String]?)] {
+            let copy = try copyApp(to: name)
+            let plist = try #require(try PropertyListSerialization.propertyList(
+                from: Data(contentsOf: copy.appending(path: "Contents/Info.plist")), format: nil) as? [String: Any])
+            let main = copy.appending(path: "Contents/MacOS/\(try #require(plist["CFBundleExecutable"] as? String))")
+            let thin = try Shell.run("/usr/bin/lipo", main.path, "-thin", "x86_64", "-output", main.path)
+            try #require(thin.status == 0, "\(thin.output)")
+            if let priority { try editInfoPlist(copy) { $0["LSArchitecturePriority"] = priority } }
+            try resign(copy)
+        }
+
+        let result = scan()
+        for name in ["Thin.app", "ThinPriority.app"] {
+            let scanned = try app(result, name)
+            #expect(scanned.skip == .noNativeMainExecutable(["x86_64"]), "\(name)")
+            #expect(scanned.files.contains { if case .eligible = $0.decision { true } else { false } }, "\(name): other files would otherwise be thinned")
+        }
+    }
+
     @Test func malformedArchitecturePriorityIsBundleMetadata() throws {
         defer { cleanUp() }
         let copy = try copyApp(to: "App.app")

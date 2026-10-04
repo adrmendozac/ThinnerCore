@@ -16,8 +16,20 @@ public struct PendingOperations: Codable, Equatable, Sendable {
         name.hasPrefix(".thinner-") && UUID(uuidString: String(name.dropFirst(9))) != nil
     }
 
+    /// Only journals for the requested app, or for apps under the requested
+    /// directory, are reported: an app's journals sit in its parent
+    /// directory, beside its siblings' journals. A journal that cannot be
+    /// read cannot be attributed, so it stays a problem, as it blocks restore.
     public static func read(root: URL, apps: [URL]) -> PendingOperations {
         var snapshot = PendingOperations()
+        let rootIsApp = AppScanner.isApp(root.lastPathComponent)
+        let rootPaths = Set([root.standardizedFileURL.path, realPath(root.path)].compactMap { $0 })
+        func belongs(_ bundlePath: String) -> Bool {
+            let candidates = Set([bundlePath, realPath(bundlePath)].compactMap { $0 })
+            return candidates.contains { path in
+                rootPaths.contains { rootIsApp ? path == $0 : path.hasPrefix($0 == "/" ? "/" : $0 + "/") }
+            }
+        }
         let directories = Set(([AppScanner.isApp(root.lastPathComponent) ? root.deletingLastPathComponent() : root]
             + apps.map { $0.deletingLastPathComponent() }).map { $0.standardizedFileURL.path })
         for directory in directories.sorted() {
@@ -38,7 +50,7 @@ public struct PendingOperations: Codable, Equatable, Sendable {
                             snapshot.problems.append("Unsupported journal schema at \(journalPath.path)")
                             continue
                         }
-                        if journal.state == .inProgress || journal.state == .recoveryFailed {
+                        if journal.state == .inProgress || journal.state == .recoveryFailed, belongs(journal.bundlePath) {
                             snapshot.operations.append(.init(journalPath: journalPath.path, bundlePath: journal.bundlePath, state: journal.state.rawValue))
                         }
                     } catch {

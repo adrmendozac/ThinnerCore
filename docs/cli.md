@@ -3,10 +3,12 @@
 The command is `thinnercore`. The terminal interface uses Ink and React;
 the native Swift executable supplies the scan report and safety checks.
 
-Build the native executable, then run the frontend from this checkout:
+Build the native executable, install the frontend's dependencies from the
+lockfile, then run the frontend from this checkout:
 
 ```sh
 DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer swift build -c release
+npm ci
 npm start -- scan
 ```
 

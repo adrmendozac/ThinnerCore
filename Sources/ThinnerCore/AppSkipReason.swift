@@ -17,6 +17,10 @@ public enum AppSkipReason: Hashable, Sendable, CustomStringConvertible {
     case rosettaFlagged(user: String)
     /// The "Open using Rosetta" setting could not be read, so it may be set.
     case rosettaInconclusive(String)
+    /// The main executable has no ordinary arm64 slice, so the app runs under
+    /// Rosetta; removing x86_64 from its other code would break it. Applies
+    /// to thin Intel executables, which the walker never lists.
+    case noNativeMainExecutable([String])
     /// `LSArchitecturePriority` in `Info.plist` does not select the main
     /// executable's arm64 slice: the first listed architecture the executable
     /// contains is Intel (the app runs under Rosetta, Phase 0), another
@@ -37,6 +41,7 @@ public enum AppSkipReason: Hashable, Sendable, CustomStringConvertible {
         case .scriptOnly: "scriptOnly"
         case .rosettaFlagged: "rosettaFlagged"
         case .rosettaInconclusive: "rosettaInconclusive"
+        case .noNativeMainExecutable: "noNativeMainExecutable"
         case .intelArchitecturePriority: "intelArchitecturePriority"
         case .signatureInvalid: "signatureInvalid"
         }
@@ -51,6 +56,8 @@ public enum AppSkipReason: Hashable, Sendable, CustomStringConvertible {
         case let .scriptOnly(detail): "no executable binary (script-only app): \(detail)"
         case let .rosettaFlagged(user): "set to Open using Rosetta in \(user)'s preferences"
         case let .rosettaInconclusive(detail): "cannot tell whether it is set to Open using Rosetta: \(detail)"
+        case let .noNativeMainExecutable(archs):
+            "the main executable has no arm64 slice (\(archs.joined(separator: ", "))), so the app runs under Rosetta"
         case let .intelArchitecturePriority(archs):
             "LSArchitecturePriority does not select the arm64 slice (\(archs.joined(separator: ", ")))"
         case let .signatureInvalid(detail): "fails code signature verification: \(detail)"

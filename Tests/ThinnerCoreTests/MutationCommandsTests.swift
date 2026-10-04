@@ -41,6 +41,28 @@ import Testing
         #expect(report.exitCode == 3)
     }
 
+    /// Regression: a single-app report searched the app's parent directory
+    /// and reported every journal there, including a sibling app's.
+    @Test func singleAppReportIgnoresASiblingsJournal() throws {
+        let dir = FileManager.default.temporaryDirectory.appending(path: "sibling-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        for name in ["Mine.app", "Sibling.app"] {
+            try FileManager.default.createDirectory(at: dir.appending(path: "\(name)/Contents"), withIntermediateDirectories: true)
+        }
+        let stage = dir.appending(path: ".thinner-00000000-0000-0000-0000-000000000004")
+        try FileManager.default.createDirectory(at: stage, withIntermediateDirectories: false)
+        let journal = Journal(operationID: "test", bundlePath: dir.appending(path: "Sibling.app").path,
+                              bundleIdentifier: "test", startedAt: "test")
+        try JSONEncoder().encode(journal).write(to: stage.appending(path: "journal.json"))
+
+        let mine = MutationCommands.unavailable("restore", root: dir.appending(path: "Mine.app"))
+        #expect(mine.apps.map(\.outcome) == [.refused], "only the release gate, no pending operation")
+        #expect(PendingOperations.read(root: dir.appending(path: "Mine.app"), apps: []).operations.isEmpty)
+        let sibling = PendingOperations.read(root: dir.appending(path: "Sibling.app"), apps: [])
+        #expect(sibling.operations.count == 1)
+        #expect(PendingOperations.read(root: dir, apps: []).operations.count == 1, "a directory report includes it")
+    }
+
     @Test func journalSnapshotDoesNotWriteOrFollowSymlinks() throws {
         let dir = FileManager.default.temporaryDirectory.appending(path: "pending-\(UUID())")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

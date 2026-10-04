@@ -105,7 +105,8 @@ public struct ScanResult: Equatable, Sendable {
 ///
 /// Each app is then checked, and skipped whole for the first reason that
 /// applies: protected location, user exclusion, unreadable metadata,
-/// script-only, "Open using Rosetta", Intel-first `LSArchitecturePriority`,
+/// script-only, "Open using Rosetta", a main executable without an arm64
+/// slice, an `LSArchitecturePriority` that does not select arm64,
 /// and, if any file is eligible, failing `codesign --verify`.
 public enum AppScanner {
     /// `progress` is called with each app's relative path before it is read.
@@ -262,12 +263,17 @@ public enum AppScanner {
                     skip = .rosettaInconclusive(detail)
                 } else if rosetta.flag(for: info.bundleIdentifier) == .flagged {
                     skip = .rosettaFlagged(user: rosetta.status.preferencesUser)
-                } else if let priority = info.architecturePriority,
-                          let main = classified.files.first(where: { $0.relativePath == "Contents/MacOS/\(info.executable)" }),
-                          info.prioritySelection(from: main.architectures) != .arm64 {
-                    // Only the ordinary arm64 slice is known to launch natively;
-                    // an unmatched list is unmeasured, so it skips too.
-                    skip = .intelArchitecturePriority(priority)
+                } else {
+                    // Read from the executable itself: the walker lists only
+                    // universal files, so a thin Intel executable is not there.
+                    let main = try info.mainExecutableArchitectures(tree: tree)
+                    if !main.contains(.arm64) {
+                        skip = .noNativeMainExecutable(main.map(\.description))
+                    } else if let priority = info.architecturePriority, info.prioritySelection(from: main) != .arm64 {
+                        // Only the ordinary arm64 slice is known to launch natively;
+                        // an unmatched list is unmeasured, so it skips too.
+                        skip = .intelArchitecturePriority(priority)
+                    }
                 }
             } catch {
                 skip = .bundleMetadata(error.description)

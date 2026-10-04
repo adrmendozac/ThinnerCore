@@ -137,11 +137,11 @@ public struct FatBinary: Equatable, Sendable {
     }
 }
 
-private func readBE32(_ bytes: [UInt8], _ at: Int) -> UInt32 {
+func readBE32(_ bytes: [UInt8], _ at: Int) -> UInt32 {
     bytes[at..<at + 4].reduce(0) { $0 << 8 | UInt32($1) }
 }
 
-private func readLE32(_ bytes: [UInt8], _ at: Int) -> UInt32 {
+func readLE32(_ bytes: [UInt8], _ at: Int) -> UInt32 {
     bytes[at..<at + 4].reversed().reduce(0) { $0 << 8 | UInt32($1) }
 }
 

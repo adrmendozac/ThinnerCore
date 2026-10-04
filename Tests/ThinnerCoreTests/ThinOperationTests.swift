@@ -45,6 +45,32 @@ import Foundation
         #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path) == ["Signed.app"])
     }
 
+    /// Regression: thinning, restoring, and thinning again without an update
+    /// leaves two backup sets for one version, both claiming every file, and
+    /// restore refused although either backup restores it. A damaged backup
+    /// in one set must not block the other.
+    @Test func restoresAfterRethinningTheSameVersion() throws {
+        defer { cleanUp() }
+        let originals = try eligibleHashes()
+        try #require(!originals.isEmpty)
+        #expect(try ThinOperation.applyUnreleased(to: app, options: options, environment: idleEnvironment) == .committed)
+        #expect(RestoreOperation.restoreUnreleased(app, environment: idleEnvironment).outcome == .restored)
+        #expect(try ThinOperation.applyUnreleased(to: app, options: options, environment: idleEnvironment) == .committed)
+
+        let stagings = try FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)
+            .filter { $0.lastPathComponent.hasPrefix(".thinner-") }
+        try #require(stagings.count == 2)
+        let damaged = try #require(FileManager.default.enumerator(at: stagings[0].appending(path: "backups"), includingPropertiesForKeys: nil)?
+            .compactMap { $0 as? URL }.first { originals.keys.contains(where: $0.path.hasSuffix) })
+        try Data("damaged".utf8).write(to: damaged)
+
+        let restored = RestoreOperation.restoreUnreleased(app, environment: idleEnvironment)
+        #expect(restored.outcome == .restored, "\(restored.outcome)")
+        #expect(try eligibleHashes() == originals)
+        #expect(restored.notes.contains { $0.contains("backup sets hold the same original") })
+        #expect(Codesign.verify(app) == nil)
+    }
+
     /// Regression: the writer recorded no app identity, so restore refused
     /// every journal it wrote; and it left a lock file beside the app.
     @Test func writerRecordsIdentityAndRestoreUndoesIt() throws {

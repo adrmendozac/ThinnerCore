@@ -162,7 +162,10 @@ public enum RestoreOperation {
         let tree = try FileTree(bundle)
         var plan: [PlannedFile] = []
         var changed: [String] = []
-        var claimed = Set<String>()
+        // Every set that claims each thinned file. Thinning, restoring, and
+        // thinning again without an update leaves two sets for one version.
+        var claims: [String: [(set: Int, entry: Journal.Entry, file: PlannedFile)]] = [:]
+        var claimOrder: [String] = []
 
         for (index, set) in sets.enumerated() {
             for entry in set.journal.entries {
@@ -183,14 +186,39 @@ public enum RestoreOperation {
                     changed.append(entry.relativePath)
                     continue
                 }
-                guard claimed.insert(entry.relativePath).inserted else {
-                    throw Problem("two backup sets both claim \(entry.relativePath); restore cannot tell which is right")
-                }
-                try checkBackup(entry, in: set)
-                plan.append(PlannedFile(set: index, relativePath: entry.relativePath, target: target,
-                                        backup: entry.backupPath, originalHash: entry.originalHash,
-                                        thinnedHash: thinned, identity: identity))
+                if claims[entry.relativePath] == nil { claimOrder.append(entry.relativePath) }
+                claims[entry.relativePath, default: []].append((index, entry, PlannedFile(
+                    set: index, relativePath: entry.relativePath, target: target, backup: entry.backupPath,
+                    originalHash: entry.originalHash, thinnedHash: thinned, identity: identity)))
             }
+        }
+
+        for path in claimOrder {
+            let candidates = claims[path]!
+            // Sets that agree on both hashes hold the same original for the
+            // same thinned file, so any valid one restores it. Sets that
+            // disagree cannot be told apart, so nothing is restored.
+            guard Set(candidates.map { "\($0.entry.originalHash)|\($0.file.thinnedHash)" }).count == 1 else {
+                throw Problem("backup sets disagree about the original of \(path); restore cannot tell which is right")
+            }
+            // Newest first; ISO 8601 timestamps sort chronologically.
+            let ordered = candidates.sorted { sets[$0.set].journal.startedAt > sets[$1.set].journal.startedAt }
+            var firstProblem: Problem?
+            var chosen: PlannedFile?
+            for candidate in ordered {
+                do {
+                    try checkBackup(candidate.entry, in: sets[candidate.set])
+                    chosen = candidate.file
+                    break
+                } catch {
+                    if firstProblem == nil { firstProblem = error }
+                }
+            }
+            guard let chosen else { throw firstProblem! }
+            if candidates.count > 1 {
+                result.notes.append("\(candidates.count) backup sets hold the same original of \(path); restored it from \(sets[chosen.set].staging.path)")
+            }
+            plan.append(chosen)
         }
 
         guard changed.isEmpty else {
