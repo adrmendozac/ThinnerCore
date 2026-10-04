@@ -27,6 +27,35 @@ import Testing
         #expect(result.inspected > 0)
     }
 
+    /// Regression: libproc failures other than EPERM read as "no files", so
+    /// a process that could not be fully inspected counted as idle.
+    @Test func onlyMeasuredEndAnswersCountAsComplete() {
+        #expect(BundleUsage.regionWalkEnd(errno: EINVAL, paths: ["a"]) == .read(["a"]))
+        #expect(BundleUsage.regionWalkEnd(errno: ESRCH, paths: ["a"]) == .gone)
+        for code in [EPERM, ENOMEM, EIO, ENOENT, 0] {
+            #expect(BundleUsage.regionWalkEnd(errno: code, paths: []) == .unreadable, "errno \(code)")
+        }
+        #expect(BundleUsage.emptyFDList(errno: 0) == .read([]))
+        #expect(BundleUsage.emptyFDList(errno: ESRCH) == .gone)
+        for code in [EPERM, ENOMEM, EINVAL] {
+            #expect(BundleUsage.emptyFDList(errno: code) == .unreadable, "errno \(code)")
+        }
+        #expect(BundleUsage.fdInfoFailure(errno: EBADF, bytes: 0) == nil, "a closed descriptor is skipped")
+        #expect(BundleUsage.fdInfoFailure(errno: ESRCH, bytes: 0) == .gone)
+        #expect(BundleUsage.fdInfoFailure(errno: EPERM, bytes: 0) == .unreadable)
+        #expect(BundleUsage.fdInfoFailure(errno: 0, bytes: 12) == .unreadable, "a short result is partial")
+    }
+
+    /// launchd belongs to root, so a normal user cannot read its files; the
+    /// scan must count it rather than call it idle.
+    @Test func countsAnotherUsersProcessAsUninspectable() throws {
+        defer { remove() }
+        try #require(getuid() != 0, "root can read every process; this test needs a normal user")
+        #expect(BundleUsage.regions(1, BundleUsage.Matcher(bundle: bundle.path, files: [])) == .unreadable)
+        #expect(BundleUsage.openFiles(1, BundleUsage.Matcher(bundle: bundle.path, files: [])) == .unreadable)
+        #expect(try BundleUsage.scan(bundle).uninspectable > 0)
+    }
+
     @Test func findsAnExecutableInsideTheBundle() throws {
         defer { remove() }
         let process = try start(bundle.appending(path: "Contents/MacOS/sleeper").path, ["30"])
