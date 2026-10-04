@@ -96,7 +96,7 @@ struct HeldAppLock {
         }
 
         // Later runs refuse the damaged backup too, and change nothing.
-        let restore = RestoreOperation.restore(fixture.app, environment: idleEnvironment)
+        let restore = RestoreOperation.restoreUnreleased(fixture.app, environment: idleEnvironment)
         guard case .refused(let why) = restore.outcome else {
             Issue.record("expected restore to refuse, got \(restore.outcome)")
             return
@@ -177,7 +177,7 @@ struct HeldAppLock {
             updated = (path, hash)
         }
 
-        let result = RestoreOperation.restore(copy.app, environment: env)
+        let result = RestoreOperation.restoreUnreleased(copy.app, environment: env)
         guard case .pending(let reason) = result.outcome else {
             Issue.record("expected pending, got \(result.outcome)")
             return
@@ -204,7 +204,7 @@ struct HeldAppLock {
 
         let apply = try ThinOperation.applyUnreleased(to: fixture.app, options: fixture.options, environment: idleEnvironment)
         let recover = ThinOperation.recoverUnreleased(fixture.app, environment: idleEnvironment)
-        let restore = RestoreOperation.restore(fixture.app, environment: idleEnvironment)
+        let restore = RestoreOperation.restoreUnreleased(fixture.app, environment: idleEnvironment)
         holder.stop()
 
         guard case .skipped(let applyReason) = apply else { Issue.record("apply: \(apply)"); return }

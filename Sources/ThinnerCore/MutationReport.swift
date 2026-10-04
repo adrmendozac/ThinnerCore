@@ -34,7 +34,8 @@ public struct MutationReport: Codable, Equatable, Sendable {
     }
 
     public var text: String {
-        (apps.map { "\($0.path): \($0.outcome.rawValue) — \($0.reason)" } + problems).joined(separator: "\n")
+        (apps.map { "\($0.path): \($0.outcome.rawValue) — \($0.reason)" } + problems)
+            .map(TerminalText.sanitize).joined(separator: "\n")
     }
 }
 
@@ -80,13 +81,16 @@ public enum MutationCommands {
     }
 
     public static func unavailable(_ command: String, root: URL) -> MutationReport {
-        let snapshot = PendingOperations.read(root: root, apps: [])
+        // Journals sit beside each app, so a directory's nested apps must be
+        // found first; the root alone holds only its direct children's.
+        let located = AppScanner.appLocations(root)
+        let snapshot = PendingOperations.read(root: root, apps: located.apps)
         let pending: [MutationReport.App] = snapshot.operations.map {
             .init(path: $0.bundlePath, outcome: $0.state == "recoveryFailed" ? .recoveryFailed : .recoveryPending,
                   reason: "Unfinished operation at \($0.journalPath). \(releaseBlock)")
         }
         return MutationReport(command: command,
                               apps: pending.isEmpty ? [.init(path: root.path, outcome: .refused, reason: releaseBlock)] : pending,
-                              problems: snapshot.problems)
+                              problems: located.problems + snapshot.problems)
     }
 }

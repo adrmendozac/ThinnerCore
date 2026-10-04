@@ -97,7 +97,7 @@ private var idle: RestoreOperation.Environment {
         defer { copy.remove() }
         try #require(Codesign.verify(copy.app) == nil)
 
-        let result = RestoreOperation.restore(copy.app, environment: idle)
+        let result = RestoreOperation.restoreUnreleased(copy.app, environment: idle)
         #expect(result.outcome == .restored, "\(result.outcome) \(result.notes)")
         #expect(Set(result.restored) == Set(copy.entries.map(\.relativePath)))
         for entry in copy.entries {
@@ -110,12 +110,54 @@ private var idle: RestoreOperation.Environment {
         #expect(try copy.restoreRecord()["state"] as? String == "restored")
     }
 
+    /// Regression (Greptile): the public restore changed apps while the
+    /// release gate was closed, unlike `apply` and `recover`.
+    @Test func libraryRestoreRespectsReleaseGate() throws {
+        let copy = try ThinnedCopy()
+        defer { copy.remove() }
+        let result = RestoreOperation.restore(copy.app)
+        #expect(result.outcome == .refused(MutationCommands.releaseBlock))
+        #expect(try copy.allStillThinned())
+        #expect(!FileManager.default.fileExists(atPath: copy.staging.appending(path: "restore.json").path))
+    }
+
+    /// Regression (Greptile): a backup set from an earlier version refused
+    /// every restore. Thin v1, update to v2 (undoing the thinning), thin v2:
+    /// restore must put v2's originals back and keep v1's set untouched.
+    @Test func restoreAfterUpdateAndRethinIgnoresTheOlderVersionsBackups() throws {
+        let copy = try ThinnedCopy()
+        defer { copy.remove() }
+        let v1Backups = try copy.entries.map { ($0.backupPath, try SHA256.hash(file: $0.backupPath)) }
+
+        // The update: a fresh universal copy with a new version and signature.
+        try FileManager.default.removeItem(at: copy.app)
+        try #require(try Shell.run("/usr/bin/ditto", Fixtures.url("bundles/Signed.app").path, copy.app.path).status == 0)
+        let plistURL = copy.app.appending(path: "Contents/Info.plist")
+        var plist = try #require(try PropertyListSerialization.propertyList(from: Data(contentsOf: plistURL), format: nil) as? [String: Any])
+        plist["CFBundleVersion"] = "2"
+        try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0).write(to: plistURL)
+        try #require(try Shell.run("/usr/bin/codesign", "--force", "--sign", "-", copy.app.path).status == 0)
+        let v2Originals = Dictionary(uniqueKeysWithValues: try copy.entries.map { ($0.relativePath, try copy.hash($0.relativePath)) })
+
+        let options = ScanOptions(launchServicesPreferences: copy.dir.appending(path: "no-prefs.plist"))
+        #expect(try ThinOperation.applyUnreleased(to: copy.app, options: options, environment: idleEnvironment) == .committed)
+
+        let result = RestoreOperation.restoreUnreleased(copy.app, environment: idle)
+        #expect(result.outcome == .restored, "\(result.outcome)")
+        for (path, hash) in v2Originals { #expect(try copy.hash(path) == hash, "v2's original is back: \(path)") }
+        #expect(Codesign.verify(copy.app) == nil)
+        #expect(result.notes.contains { $0.contains(copy.staging.path) && $0.contains("another version") })
+        for (path, hash) in v1Backups { #expect(try SHA256.hash(file: path) == hash, "v1's backup is kept: \(path)") }
+        #expect(!FileManager.default.fileExists(atPath: copy.staging.appending(path: "restore.json").path),
+                "v1's set is not touched")
+    }
+
     @Test func secondRestoreFindsNothingToDo() throws {
         let copy = try ThinnedCopy()
         defer { copy.remove() }
-        #expect(RestoreOperation.restore(copy.app, environment: idle).outcome == .restored)
+        #expect(RestoreOperation.restoreUnreleased(copy.app, environment: idle).outcome == .restored)
 
-        let again = RestoreOperation.restore(copy.app, environment: idle)
+        let again = RestoreOperation.restoreUnreleased(copy.app, environment: idle)
         guard case .nothingToRestore = again.outcome else {
             Issue.record("expected nothing to restore, got \(again.outcome)")
             return
@@ -133,7 +175,7 @@ private var idle: RestoreOperation.Environment {
     @Test func refusesARecordWithoutAppIdentity() throws {
         let copy = try ThinnedCopy(recordIdentity: false)
         defer { copy.remove() }
-        let result = RestoreOperation.restore(copy.app, environment: idle)
+        let result = RestoreOperation.restoreUnreleased(copy.app, environment: idle)
         try expectRefused(result, containing: "which version")
         #expect(try copy.allStillThinned())
     }
@@ -146,7 +188,7 @@ private var idle: RestoreOperation.Environment {
             identity["bundleVersion"] = "999"
             journal[AppIdentity.journalKey] = identity
         }
-        try expectRefused(RestoreOperation.restore(copy.app, environment: idle), containing: "changed since it was thinned")
+        try expectRefused(RestoreOperation.restoreUnreleased(copy.app, environment: idle), containing: "changed since it was thinned")
         #expect(try copy.allStillThinned())
     }
 
@@ -159,7 +201,7 @@ private var idle: RestoreOperation.Environment {
         try handle.write(contentsOf: Data([0]))
         try handle.close()
 
-        try expectRefused(RestoreOperation.restore(copy.app, environment: idle), containing: changed.relativePath)
+        try expectRefused(RestoreOperation.restoreUnreleased(copy.app, environment: idle), containing: changed.relativePath)
         for entry in copy.entries.dropFirst() {
             #expect(try copy.hash(entry.relativePath) == entry.thinnedHash)
         }
@@ -173,7 +215,7 @@ private var idle: RestoreOperation.Environment {
         try handle.write(contentsOf: Data([0xFF, 0xFF]))
         try handle.close()
 
-        try expectRefused(RestoreOperation.restore(copy.app, environment: idle), containing: "damaged")
+        try expectRefused(RestoreOperation.restoreUnreleased(copy.app, environment: idle), containing: "damaged")
         #expect(try copy.allStillThinned())
     }
 
@@ -184,7 +226,7 @@ private var idle: RestoreOperation.Environment {
         defer { holder.stop() }
         try holder.waitUntilVisible(in: copy.app)
 
-        try expectRefused(RestoreOperation.restore(copy.app), containing: "in use")
+        try expectRefused(RestoreOperation.restoreUnreleased(copy.app), containing: "in use")
         #expect(try copy.allStillThinned())
     }
 
@@ -199,7 +241,7 @@ private var idle: RestoreOperation.Environment {
         var env = idle
         env.usage = { _ throws(Problem) in BundleUsage.Result(uninspectable: 1) }
 
-        try expectRefused(RestoreOperation.restore(copy.app, environment: env), containing: "could not be inspected")
+        try expectRefused(RestoreOperation.restoreUnreleased(copy.app, environment: env), containing: "could not be inspected")
         #expect(try copy.allStillThinned())
         // Only the backups' own `StagingLock` file may appear.
         let after = FileManager.default.subpaths(atPath: copy.staging.path)?.filter { $0 != ".lock" }.sorted()
@@ -220,7 +262,7 @@ private var idle: RestoreOperation.Environment {
             guard calls.value >= 3 else { return BundleUsage.Result() }
             return BundleUsage.Result(uses: [.init(pid: 4242, how: .executable, path: url.path + "/Contents/MacOS/Signed")])
         }
-        let first = RestoreOperation.restore(copy.app, environment: env)
+        let first = RestoreOperation.restoreUnreleased(copy.app, environment: env)
         guard case .pending = first.outcome else {
             Issue.record("expected pending, got \(first.outcome)")
             return
@@ -230,7 +272,7 @@ private var idle: RestoreOperation.Environment {
         #expect(Codesign.verify(copy.app) == nil, "a part-way restore leaves every file individually valid")
         #expect(try copy.restoreRecord()["state"] as? String == "pending")
 
-        let second = RestoreOperation.restore(copy.app, environment: idle)
+        let second = RestoreOperation.restoreUnreleased(copy.app, environment: idle)
         #expect(second.outcome == .restored)
         #expect(second.alreadyOriginal == first.restored)
         #expect(second.restored.count == copy.entries.count - 1)
@@ -242,7 +284,7 @@ private var idle: RestoreOperation.Environment {
         var env = idle
         env.verify = { _ in "simulated verification failure" }
 
-        let result = RestoreOperation.restore(copy.app, environment: env)
+        let result = RestoreOperation.restoreUnreleased(copy.app, environment: env)
         guard case .recoveryFailed(let reason) = result.outcome else {
             Issue.record("expected recovery failure, got \(result.outcome)")
             return
@@ -259,7 +301,7 @@ private var idle: RestoreOperation.Environment {
         let copy = try ThinnedCopy()
         defer { copy.remove() }
         let lock = try StagingLock(copy.staging)
-        try expectRefused(RestoreOperation.restore(copy.app, environment: idle), containing: "another operation")
+        try expectRefused(RestoreOperation.restoreUnreleased(copy.app, environment: idle), containing: "another operation")
         withExtendedLifetime(lock) {}
         #expect(try copy.allStillThinned())
     }
@@ -267,7 +309,7 @@ private var idle: RestoreOperation.Environment {
     @Test func refusesARecordThatPointsOutsideTheApp() throws {
         let copy = try ThinnedCopy(relativePathOverride: "../escape")
         defer { copy.remove() }
-        try expectRefused(RestoreOperation.restore(copy.app, environment: idle), containing: "unsafe path")
+        try expectRefused(RestoreOperation.restoreUnreleased(copy.app, environment: idle), containing: "unsafe path")
     }
 
     @Test func refusesABackupOutsideItsStagingDirectory() throws {
@@ -281,7 +323,7 @@ private var idle: RestoreOperation.Environment {
             entries[0]["backupPath"] = outside.path
             journal["entries"] = entries
         }
-        try expectRefused(RestoreOperation.restore(copy.app, environment: idle), containing: "not inside")
+        try expectRefused(RestoreOperation.restoreUnreleased(copy.app, environment: idle), containing: "not inside")
         #expect(try copy.allStillThinned())
     }
 
@@ -292,7 +334,7 @@ private var idle: RestoreOperation.Environment {
         let app = dir.appending(path: "Signed.app")
         try #require(try Shell.run("/usr/bin/ditto", Fixtures.url("bundles/Signed.app").path, app.path).status == 0)
 
-        let result = RestoreOperation.restore(app, environment: idle)
+        let result = RestoreOperation.restoreUnreleased(app, environment: idle)
         guard case .nothingToRestore = result.outcome else {
             Issue.record("expected nothing to restore, got \(result.outcome)")
             return

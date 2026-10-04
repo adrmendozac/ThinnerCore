@@ -163,6 +163,55 @@ public enum AppScanner {
         return result
     }
 
+    /// App bundles at or below `root`, found without reading them, so pending
+    /// journals beside nested apps can be inspected. Protected locations are
+    /// not searched; user exclusions are ignored, since reporting a journal
+    /// changes nothing. Walk problems are returned so a partial walk is not
+    /// mistaken for "nothing pending".
+    static func appLocations(_ root: URL) -> (apps: [URL], problems: [String]) {
+        if isApp(root.lastPathComponent) { return ([root], []) }
+        let tree: FileTree
+        do { tree = try FileTree(root) } catch { return ([], ["Cannot search \(root.path) for apps: \(error)"]) }
+        guard let rootReal = realPath(root.path) else {
+            return ([], ["Cannot search \(root.path) for apps: \(errnoDescription())"])
+        }
+        var found: [(path: [String], skip: AppSkipReason?)] = []
+        var issues: [WalkIssue] = []
+        var skippedPaths: [SkippedPath] = []
+        discover(in: tree, at: [], rootReal: rootReal,
+                 skip: { ProtectedLocations.protectedPrefix(of: $0).map { .protectedLocation("under \($0)") } },
+                 apps: &found, issues: &issues, skippedPaths: &skippedPaths)
+        return (found.map { root.appending(path: $0.path.joined(separator: "/")) },
+                issues.map { "Cannot search \(join(root.path, $0.relativePath)) for apps: \($0.problem)" })
+    }
+
+    private static func discover(in tree: FileTree, at path: [String], rootReal: String,
+                                 skip skipBeforeReading: (String) -> AppSkipReason?,
+                                 apps: inout [(path: [String], skip: AppSkipReason?)],
+                                 issues: inout [WalkIssue], skippedPaths: inout [SkippedPath]) {
+        let entries: [(name: String, kind: FileTree.Kind)]
+        do {
+            entries = try tree.entries(path)
+        } catch {
+            issues.append(WalkIssue(relativePath: path.joined(separator: "/"), problem: error.description))
+            return
+        }
+        for entry in entries where entry.kind == .directory {
+            // Backup trees are operation storage, never app-discovery roots.
+            if PendingOperations.isStagingName(entry.name) { continue }
+            let child = path + [entry.name]
+            let skip = skipBeforeReading(join(rootReal, child.joined(separator: "/")))
+            if isApp(entry.name) {
+                apps.append((child, skip))
+            } else if let skip {
+                skippedPaths.append(SkippedPath(relativePath: child.joined(separator: "/"), reason: skip))
+            } else {
+                discover(in: tree, at: child, rootReal: rootReal, skip: skipBeforeReading,
+                         apps: &apps, issues: &issues, skippedPaths: &skippedPaths)
+            }
+        }
+    }
+
     static func isApp(_ name: String) -> Bool {
         name.count > 4 && name.lowercased().hasSuffix(".app")
     }
@@ -188,26 +237,8 @@ public enum AppScanner {
 
         func discover(in tree: FileTree, at path: [String], rootReal: String,
                       apps: inout [(path: [String], skip: AppSkipReason?)], result: inout ScanResult) {
-            let entries: [(name: String, kind: FileTree.Kind)]
-            do {
-                entries = try tree.entries(path)
-            } catch {
-                result.issues.append(WalkIssue(relativePath: path.joined(separator: "/"), problem: error.description))
-                return
-            }
-            for entry in entries where entry.kind == .directory {
-                // Backup trees are operation storage, never app-discovery roots.
-                if PendingOperations.isStagingName(entry.name) { continue }
-                let child = path + [entry.name]
-                let skip = skipBeforeReading(join(rootReal, child.joined(separator: "/")))
-                if isApp(entry.name) {
-                    apps.append((child, skip))
-                } else if let skip {
-                    result.skippedPaths.append(SkippedPath(relativePath: child.joined(separator: "/"), reason: skip))
-                } else {
-                    discover(in: tree, at: child, rootReal: rootReal, apps: &apps, result: &result)
-                }
-            }
+            AppScanner.discover(in: tree, at: path, rootReal: rootReal, skip: skipBeforeReading,
+                                apps: &apps, issues: &result.issues, skippedPaths: &result.skippedPaths)
         }
 
         func app(_ url: URL, real: String, relativePath: String) -> AppScan {

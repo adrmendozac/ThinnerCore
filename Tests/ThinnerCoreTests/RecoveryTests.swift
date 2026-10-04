@@ -46,6 +46,32 @@ func verifyFailing(on failing: Set<Int>) -> (URL) -> String? {
         #expect(try journalState(copy) == "committed")
     }
 
+    /// Regression: a writer that stopped after replacing some files left the
+    /// rest unthinned, and recovery marked the whole operation committed.
+    @Test func rollsBackAPartlyReplacedOperation() throws {
+        let copy = try ThinnedCopy()
+        defer { copy.remove() }
+        try #require(copy.entries.count >= 2)
+        try interrupted(copy)
+        let unreached = try #require(copy.entries.first)
+        let target = copy.app.appending(path: unreached.relativePath)
+        try FileManager.default.removeItem(at: target)
+        try FileManager.default.copyItem(at: URL(filePath: unreached.backupPath), to: target)
+
+        let outcome = ThinOperation.recoverUnreleased(copy.app, environment: idleEnvironment)
+        guard case .rolledBack(let reason) = outcome else {
+            Issue.record("expected rolledBack, got \(outcome)")
+            return
+        }
+        #expect(reason.contains("rerun"))
+        for entry in copy.entries {
+            #expect(try copy.hash(entry.relativePath) == entry.originalHash)
+            #expect(try SHA256.hash(file: entry.backupPath) == entry.originalHash, "the backup survives")
+        }
+        #expect(Codesign.verify(copy.app) == nil)
+        #expect(try journalState(copy) == "rolledBack")
+    }
+
     /// Regression: rollback renamed each backup into the app, consuming it.
     @Test func rollsBackByCloningAndKeepsEveryBackup() throws {
         let copy = try ThinnedCopy()
@@ -204,7 +230,7 @@ func verifyFailing(on failing: Set<Int>) -> (URL) -> String? {
         let copy = try ThinnedCopy()
         defer { copy.remove() }
         let lock = try AppLock(try #require(realPath(copy.app.path)))
-        let result = RestoreOperation.restore(copy.app, environment: idleEnvironment)
+        let result = RestoreOperation.restoreUnreleased(copy.app, environment: idleEnvironment)
         withExtendedLifetime(lock) {}
         guard case .refused(let reason) = result.outcome else {
             Issue.record("expected refused, got \(result.outcome)")

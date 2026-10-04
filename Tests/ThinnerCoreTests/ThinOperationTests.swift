@@ -63,7 +63,7 @@ import Foundation
         #expect(journal.appIdentity == (try AppIdentity.of(app)))
         #expect(try FileManager.default.contentsOfDirectory(atPath: dir.path).filter { !$0.hasPrefix(".thinner-") } == ["Signed.app"])
 
-        let restored = RestoreOperation.restore(app, environment: idleEnvironment)
+        let restored = RestoreOperation.restoreUnreleased(app, environment: idleEnvironment)
         #expect(restored.outcome == .restored)
         #expect(try eligibleHashes() == originals)
     }

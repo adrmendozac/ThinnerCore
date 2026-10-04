@@ -398,6 +398,7 @@ public enum ThinOperation {
 
         let tree = try FileTree(bundle)
         var swapped: [Int] = []
+        var untouched: [Int] = []
         var changed: [String] = []
         for (i, entry) in journal.entries.enumerated() {
             guard let parts = RestoreOperation.safeComponents(entry.relativePath) else {
@@ -413,7 +414,7 @@ public enum ThinOperation {
                 throw error
             }
             let hash = try SHA256.hash(file: bundle.path + "/" + entry.relativePath)
-            if hash == entry.originalHash { journal.entries[i].state = .restored; continue }
+            if hash == entry.originalHash { untouched.append(i); continue }
             if let thinned = entry.thinnedHash, hash == thinned {
                 swapped.append(i)
             } else {
@@ -431,10 +432,18 @@ public enum ThinOperation {
         for directory in Set(journal.entries.map { (bundle.path + "/" + $0.relativePath as NSString).deletingLastPathComponent }) {
             if let problem = env.flushDirectory(directory) { return .pending(reason: "cannot flush recovered directory: \(problem)") }
         }
+        for i in untouched { journal.entries[i].state = .restored }
         guard !swapped.isEmpty else {
             journal.state = .rolledBack
             try journal.persist(to: journalPath)
             return .rolledBack(reason: "the interrupted operation had not replaced any file")
+        }
+        // The writer stopped part way through. Committing would report the
+        // files it never reached as done and leave nothing to resume, so put
+        // the replaced ones back and let the user rerun the operation.
+        guard untouched.isEmpty else {
+            return rollback(&journal, journalPath: journalPath, bundle: bundle, env: env,
+                            reason: "the interrupted operation replaced \(swapped.count) of \(journal.entries.count) files; rolled back so it can be rerun")
         }
         if env.verify(bundle) == nil {
             for i in swapped { journal.entries[i].state = .committed }

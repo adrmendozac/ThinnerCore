@@ -55,13 +55,17 @@ public struct RestoreResult: Sendable {
 ///
 /// Refused, with nothing changed, when: the app is in a protected location;
 /// another operation holds the app's `AppLock` or a backup set; a backup record is unreadable, of
-/// unknown schema, or lacks the app identity; the app's identity differs from
-/// the one recorded when it was thinned; any recorded file matches neither its
+/// unknown schema, or lacks the app identity; no backup set was recorded for
+/// the app's current identity (sets from other versions are kept, reported,
+/// and never restored); any recorded file matches neither its
 /// original nor its thinned hash; a backup is damaged; or any process uses a
 /// file from the bundle.
 public enum RestoreOperation {
+    /// Restore changes the app, so library clients reach it only through the
+    /// same release gate as `ThinOperation.apply` and `recover`. There is
+    /// deliberately no runtime override.
     public static func restore(_ app: URL) -> RestoreResult {
-        restore(app, environment: Environment())
+        RestoreResult(.refused(MutationCommands.releaseBlock))
     }
 
     struct Environment {
@@ -72,7 +76,9 @@ public enum RestoreOperation {
         var flushDirectory: (String) -> String? = syncDirectory
     }
 
-    static func restore(_ app: URL, environment: Environment) -> RestoreResult {
+    /// The restore. Internal so tests can run it; library clients reach only
+    /// the gated `restore`.
+    static func restoreUnreleased(_ app: URL, environment: Environment = Environment()) -> RestoreResult {
         do {
             let real = try resolve(app)
             let lock = try AppLock(real)
@@ -121,9 +127,26 @@ public enum RestoreOperation {
     static func revert(_ real: String, operation: String?, _ env: Environment) throws(Problem) -> RestoreResult {
         let bundle = URL(filePath: real)
 
-        let sets = try findBackupSets(for: real).filter { operation == nil || $0.journal.operationID == operation }
-        guard !sets.isEmpty else {
+        let found = try findBackupSets(for: real).filter { operation == nil || $0.journal.operationID == operation }
+        guard !found.isEmpty else {
             return RestoreResult(.nothingToRestore("no backups made by this tool were found next to the app"))
+        }
+
+        // A record without the app identity might belong to this version, so
+        // it blocks everything rather than being set aside.
+        for set in found where set.identity == nil {
+            throw Problem("the backup record in \(set.staging.path) does not say which version of the app it belongs to, so its backups cannot be trusted for this app")
+        }
+        // Sets made for another version stay untouched: an update undoes
+        // thinning, and re-thinning the new version adds a set beside the old
+        // one, which must not block restoring the new version. Rollback and
+        // recovery name one operation, which must match.
+        let current = try AppIdentity.of(bundle)
+        let sets = found.filter { $0.identity == current }
+        let otherVersions = found.filter { $0.identity != current }
+        guard !sets.isEmpty, operation == nil || otherVersions.isEmpty else {
+            let recorded = otherVersions.compactMap(\.identity).map(\.description).joined(separator: "; ")
+            throw Problem("the app changed since it was thinned, most likely by an update (thinned: \(recorded); now: \(current)). Backups from another version are never restored into it")
         }
 
         // Held until this function returns.
@@ -131,18 +154,11 @@ public enum RestoreOperation {
         for set in sets { locks.append(try StagingLock(set.staging)) }
         defer { withExtendedLifetime(locks) {} }
 
-        let current = try AppIdentity.of(bundle)
-        for set in sets {
-            guard let recorded = set.identity else {
-                throw Problem("the backup record in \(set.staging.path) does not say which version of the app it belongs to, so its backups cannot be trusted for this app")
-            }
-            guard recorded == current else {
-                throw Problem("the app changed since it was thinned, most likely by an update (thinned: \(recorded); now: \(current)). Backups from another version are never restored into it")
-            }
-        }
-
         var result = RestoreResult(.restored)
         result.backupLocations = sets.map(\.staging.path)
+        result.notes += otherVersions.map {
+            "kept backups from another version of the app (\($0.identity.map(\.description) ?? "")) in \($0.staging.path); they are never restored into this version"
+        }
         let tree = try FileTree(bundle)
         var plan: [PlannedFile] = []
         var changed: [String] = []
@@ -193,6 +209,7 @@ public enum RestoreOperation {
                 result.outcome = .recoveryFailed("original files are present, but restored app verification failed: \(problem)")
                 return result
             }
+            try closeUnfinishedRecords(sets)
             result.outcome = .nothingToRestore("every thinned file already holds its original")
             return result
         }
@@ -271,6 +288,8 @@ public enum RestoreOperation {
         }
         env.boundary("restore-verified", "")
         try finish(&records, sets, .restored, nil)
+        // Sets with nothing left to swap got no new record this run.
+        try closeUnfinishedRecords(sets)
         env.boundary("restore-committed", "")
         return result
     }
@@ -437,6 +456,39 @@ public enum RestoreOperation {
             records[i].finishedAt = now
         }
         try persistRecords(records, sets)
+    }
+
+    /// After a retry verifies the app with every file original, finish any
+    /// record an earlier run left in progress or pending, so the history does
+    /// not show unfinished work. Failed and refused records stay as they were.
+    private static func closeUnfinishedRecords(_ sets: [BackupSet]) throws(Problem) {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        for set in sets {
+            let tree = try FileTree(set.staging)
+            guard let kind = try tree.kind([RestoreRecord.fileName]) else { continue }
+            guard kind == .regular else {
+                throw Problem("the restore record in \(set.staging.path) is not a regular file")
+            }
+            var record: RestoreRecord
+            do {
+                record = try JSONDecoder().decode(RestoreRecord.self, from: tree.read([RestoreRecord.fileName], limit: 16 << 20))
+            } catch {
+                throw Problem("cannot read the restore record in \(set.staging.path): \(error)")
+            }
+            guard record.state == .inProgress || record.state == .pending else { continue }
+            record.state = .restored
+            record.reason = "finished by a later restore run that found every file original and the app verified"
+            record.finishedAt = ISO8601DateFormatter().string(from: Date())
+            for i in record.files.indices { record.files[i].state = .restored }
+            let data: Data
+            do {
+                data = try encoder.encode(record)
+            } catch {
+                throw Problem("cannot encode the restore record: \(error.localizedDescription)")
+            }
+            try durablyWrite(data, to: set.staging.appending(path: RestoreRecord.fileName))
+        }
     }
 
     private static func persistRecords(_ records: [RestoreRecord], _ sets: [BackupSet]) throws(Problem) {

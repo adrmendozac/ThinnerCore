@@ -12,6 +12,35 @@ import Testing
         #expect(report.exitCode == 4)
     }
 
+    /// Regression: text reports printed paths and reasons with raw terminal
+    /// controls, so a crafted path or journal could rewrite the display.
+    @Test func textEscapesTerminalControls() throws {
+        let report = MutationReport(command: "restore", apps: [
+            .init(path: "Evil\u{1B}[2J.app", outcome: .refused, reason: "bad\rname")
+        ], problems: ["journal \u{9B}31m"])
+        #expect(report.text == "Evil\\u{1B}[2J.app: refused — bad\\u{0D}name\njournal \\u{9B}31m")
+        #expect(try report.json().contains("\\u001b[2J"), "JSON keeps the original string")
+    }
+
+    /// Regression: recover on a directory inspected only the directory
+    /// itself, so a journal beside a nested app was never reported.
+    @Test func recoverReportFindsJournalsBesideNestedApps() throws {
+        let dir = FileManager.default.temporaryDirectory.appending(path: "nested-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let folder = dir.appending(path: "Vendor/Tools")
+        try FileManager.default.createDirectory(at: folder.appending(path: "Fixture.app/Contents"), withIntermediateDirectories: true)
+        let stage = folder.appending(path: ".thinner-00000000-0000-0000-0000-000000000003")
+        try FileManager.default.createDirectory(at: stage, withIntermediateDirectories: false)
+        let journal = Journal(operationID: "test", bundlePath: folder.appending(path: "Fixture.app").path,
+                              bundleIdentifier: "test", startedAt: "test")
+        try JSONEncoder().encode(journal).write(to: stage.appending(path: "journal.json"))
+
+        let report = MutationCommands.unavailable("recover", root: dir)
+        #expect(report.apps.map(\.outcome) == [.recoveryPending])
+        #expect(report.apps.first?.path == journal.bundlePath)
+        #expect(report.exitCode == 3)
+    }
+
     @Test func journalSnapshotDoesNotWriteOrFollowSymlinks() throws {
         let dir = FileManager.default.temporaryDirectory.appending(path: "pending-\(UUID())")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)

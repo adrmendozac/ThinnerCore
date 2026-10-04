@@ -21,7 +21,7 @@ final class Phase4CrashWorker: XCTestCase {
         }
         if vars["THINNER_CRASH_MODE"] == "rollback" { env.verify = verifyFailing(on: [2]) }
         if vars["THINNER_CRASH_MODE"] == "restore" {
-            _ = RestoreOperation.restore(app, environment: env)
+            _ = RestoreOperation.restoreUnreleased(app, environment: env)
         } else {
             let prefs = app.deletingLastPathComponent().appending(path: "absent.plist")
             _ = try ThinOperation.applyUnreleased(to: app, options: ScanOptions(launchServicesPreferences: prefs), environment: env)
@@ -52,7 +52,7 @@ final class Phase4CrashWorker: XCTestCase {
                 #expect(try SHA256.hash(file: entry.backupPath) == entry.originalHash)
             }
         }
-        let restored = RestoreOperation.restore(fixture.app, environment: idleEnvironment)
+        let restored = RestoreOperation.restoreUnreleased(fixture.app, environment: idleEnvironment)
         #expect(restored.outcome.exitCode == 0)
         #expect(try fixture.eligibleHashes() == originals)
     }
@@ -63,7 +63,7 @@ final class Phase4CrashWorker: XCTestCase {
         let copy = try ThinnedCopy()
         defer { copy.remove() }
         try crash(app: copy.app, mode: "restore", at: boundary)
-        let result = RestoreOperation.restore(copy.app, environment: idleEnvironment)
+        let result = RestoreOperation.restoreUnreleased(copy.app, environment: idleEnvironment)
         #expect(result.outcome.exitCode == 0)
         #expect(Codesign.verify(copy.app) == nil)
         for entry in copy.entries {
@@ -80,7 +80,7 @@ final class Phase4CrashWorker: XCTestCase {
         try crash(app: fixture.app, mode: "rollback", at: boundary)
         let outcome = ThinOperation.recoverUnreleased(fixture.app, environment: idleEnvironment)
         #expect(outcome == .committed || { if case .rolledBack = outcome { return true }; return false }())
-        #expect(RestoreOperation.restore(fixture.app, environment: idleEnvironment).outcome.exitCode == 0)
+        #expect(RestoreOperation.restoreUnreleased(fixture.app, environment: idleEnvironment).outcome.exitCode == 0)
         #expect(try fixture.eligibleHashes() == originals)
         for entry in try fixture.stagingJournal().entries {
             #expect(try SHA256.hash(file: entry.backupPath) == entry.originalHash)
@@ -115,11 +115,11 @@ final class Phase4CrashWorker: XCTestCase {
                 calls += 1
                 return BundleUsage.Result(uninspectable: calls >= stopAt ? 1 : 0)
             }
-            let result = RestoreOperation.restore(copy.app, environment: env)
+            let result = RestoreOperation.restoreUnreleased(copy.app, environment: env)
             #expect(result.outcome.exitCode == (stopAt <= 2 ? 1 : 3))
             #expect(result.restored.count == max(0, stopAt - 2))
             if stopAt <= 2 { #expect(try copy.allStillThinned()) }
-            #expect(RestoreOperation.restore(copy.app, environment: idleEnvironment).outcome == .restored)
+            #expect(RestoreOperation.restoreUnreleased(copy.app, environment: idleEnvironment).outcome == .restored)
         }
     }
 
@@ -207,14 +207,19 @@ final class Phase4CrashWorker: XCTestCase {
             calls += 1
             return calls == copy.entries.count ? "last directory flush failed" : nil
         }
-        #expect(RestoreOperation.restore(copy.app, environment: env).outcome.exitCode == 3)
+        #expect(RestoreOperation.restoreUnreleased(copy.app, environment: env).outcome.exitCode == 3)
+        #expect(try copy.restoreRecord()["state"] as? String == "pending")
         var retry = idleEnvironment
         retry.flushDirectory = { _ in "still failing" }
-        #expect(RestoreOperation.restore(copy.app, environment: retry).outcome.exitCode == 3)
+        #expect(RestoreOperation.restoreUnreleased(copy.app, environment: retry).outcome.exitCode == 3)
         retry = idleEnvironment
         retry.verify = { _ in "invalid restored signature" }
-        #expect(RestoreOperation.restore(copy.app, environment: retry).outcome.exitCode == 4)
-        #expect(RestoreOperation.restore(copy.app, environment: idleEnvironment).outcome.exitCode == 0)
+        #expect(RestoreOperation.restoreUnreleased(copy.app, environment: retry).outcome.exitCode == 4)
+        #expect(RestoreOperation.restoreUnreleased(copy.app, environment: idleEnvironment).outcome.exitCode == 0)
+        // Regression: the successful retry left the record pending.
+        let record = try copy.restoreRecord()
+        #expect(record["state"] as? String == "restored")
+        #expect((record["files"] as? [[String: Any]])?.allSatisfy { $0["state"] as? String == "restored" } == true)
     }
 
     @Test func writerDirectoryFlushFailureKeepsBackupsAndCannotCommit() throws {
@@ -236,9 +241,13 @@ final class Phase4CrashWorker: XCTestCase {
         defer { copy.remove() }
         var env = idleEnvironment
         env.flushDirectory = { _ in "injected I/O failure" }
-        let result = RestoreOperation.restore(copy.app, environment: env)
+        let result = RestoreOperation.restoreUnreleased(copy.app, environment: env)
         #expect(result.outcome.exitCode == 3)
         #expect(copy.entries.allSatisfy { FileManager.default.fileExists(atPath: $0.backupPath) })
-        #expect(RestoreOperation.restore(copy.app, environment: idleEnvironment).outcome.exitCode == 0)
+        #expect(RestoreOperation.restoreUnreleased(copy.app, environment: idleEnvironment).outcome.exitCode == 0)
+        // Regression: the successful retry left the record pending.
+        let record = try copy.restoreRecord()
+        #expect(record["state"] as? String == "restored")
+        #expect((record["files"] as? [[String: Any]])?.allSatisfy { $0["state"] as? String == "restored" } == true)
     }
 }
