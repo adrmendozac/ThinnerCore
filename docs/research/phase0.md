@@ -504,6 +504,14 @@ equal and provenance differing. Regression tests: `copiesQuarantineExactly`,
 in a terminal, since it needs the sudo password. It takes the lock the way
 `AppLock` does, `flock(2)` with `LOCK_EX | LOCK_NB` on the bundle directory
 opened read-only, using two empty `.app` directories it creates and deletes.
+*Amended 2026-10-03:* the script now keeps its work directory root-owned,
+gives each process its own marker directory, and refuses a `DIR` that the
+user, or anyone but root, can write unless it is sticky (use
+`/private/tmp`). The first version gave the user the work directory, so the
+user could swap `RootOwned.app` for a symlink before root ran `chmod 755` on
+it. Rerun with the hardened script against `/private/tmp` on the same
+macOS build: all four cases passed again, with the same results as below,
+and the work directory was removed afterwards.
 
 **Results** on macOS 27.0.1 (26A434). Each case checks that the contender
 sees the lock as busy while it is held and acquires it once it is released:
