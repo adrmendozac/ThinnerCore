@@ -35,3 +35,29 @@ Automated tests use generated fixtures only.
 The CLI release gate remains closed. Phase 0 permission attribution,
 provenance/Gatekeeper limits, supported OS coverage, and the other recorded
 release requirements still apply.
+
+## Phase 4 completion (2026-10-04)
+
+**Mixed-privilege runs are refused.** A staging directory belongs to the user
+whose run made it. Apply, recover, restore, and release refuse a set another
+user's run made, before writing anything to it, and name the command to rerun
+with or without `sudo` (`StagingOwner`). A directory both could write was
+rejected: a root run would then trust files an unprivileged user can change.
+
+**Releasing backups.** `ReleaseOperation` is the one explicit way backups are
+deleted, gated like apply and restore. It holds the app lock and each set's
+lock, refuses while any thinning, recovery, or restore is unfinished or a
+record cannot be read, and checks every set before deleting any. Each set is
+renamed to `.thinner-released-<UUID>`, and that rename is flushed, before it
+is deleted; if the flush fails the set is renamed back. A deletion cut short
+is finished by the next release. The result warns that afterwards only a
+reinstall brings back the Intel slice.
+
+**Retained bytes.** Scan JSON schema 3 adds `backups`: each backup set with
+its retained bytes and the bytes thinning removed that are still removed,
+plus totals. Both are logical sizes.
+
+**Tests.** `PreflightFailureTests` covers an Intel or translated host, low
+disk space, permission denial after earlier files were replaced, mixed
+privilege levels, a dry run while another process holds the app, and the
+retained-bytes report. `ReleaseTests` covers release.

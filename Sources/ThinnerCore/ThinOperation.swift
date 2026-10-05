@@ -32,7 +32,7 @@ public enum ThinOperation {
     /// the gated `apply`.
     static func applyUnreleased(to app: URL, options: ScanOptions = ScanOptions(),
                                 environment env: Environment = Environment()) throws(Problem) -> Outcome {
-        if let refusal = HostGate.check() {
+        if let refusal = env.host() {
             return .skipped(reason: refusal.description)
         }
         let real: String
@@ -65,6 +65,11 @@ public enum ThinOperation {
             // unreadable app is an ordinary skip, below.
             guard target.issues.isEmpty else {
                 return .pending(reason: "cannot inspect the complete app before recovery")
+            }
+            for set in pending {
+                if let refusal = StagingOwner.refusal(set.staging, euid: env.euid(), rerun: "recover", app: real) {
+                    return .pending(reason: refusal)
+                }
             }
             if let busy = idleRefusal(bundle, env) { return .pending(reason: busy) }
             for set in pending {
@@ -109,7 +114,8 @@ public enum ThinOperation {
         }.reduce(0, +)
 
         let operationID = UUID().uuidString
-        let staging = try StagingArea(bundlePath: bundle, operationID: operationID, requiredBytes: requiredBytes)
+        let staging = try StagingArea(bundlePath: bundle, operationID: operationID, requiredBytes: requiredBytes,
+                                      freeSpace: env.freeSpace)
 
         // Recorded before the first backup, so rollback, recovery, and
         // restore can always find the operation and prove the app's version.
@@ -353,7 +359,7 @@ public enum ThinOperation {
     /// validated path; anything else means something else changed the file,
     /// so nothing is touched and every backup is kept.
     static func recoverUnreleased(_ app: URL, environment env: Environment = Environment()) -> Outcome {
-        if let refusal = HostGate.check() {
+        if let refusal = env.host() {
             return .skipped(reason: refusal.description)
         }
         let real: String
@@ -372,6 +378,11 @@ public enum ThinOperation {
                 .filter { $0.journal.state == .inProgress || $0.journal.state == .recoveryFailed }
             guard !sets.isEmpty else {
                 return .skipped(reason: "no unfinished operation was found for \(real)")
+            }
+            for set in sets {
+                if let refusal = StagingOwner.refusal(set.staging, euid: env.euid(), rerun: "recover", app: real) {
+                    return .pending(reason: refusal)
+                }
             }
             if let busy = idleRefusal(bundle, env) {
                 return .pending(reason: "Cannot recover yet, nothing was changed: \(busy)")

@@ -21,7 +21,14 @@ public struct PendingOperations: Codable, Equatable, Sendable {
     /// directory, beside its siblings' journals. A journal that cannot be
     /// read cannot be attributed, so it stays a problem, as it blocks restore.
     public static func read(root: URL, apps: [URL]) -> PendingOperations {
+        snapshot(root: root, apps: apps).pending
+    }
+
+    /// One unlocked pass over the journals: unfinished operations, and the
+    /// backups every operation for these apps keeps.
+    static func snapshot(root: URL, apps: [URL]) -> (pending: PendingOperations, backups: RetainedBackups) {
         var snapshot = PendingOperations()
+        var backups = RetainedBackups()
         let rootIsApp = AppScanner.isApp(root.lastPathComponent)
         let rootPaths = Set([root.standardizedFileURL.path, realPath(root.path)].compactMap { $0 })
         func belongs(_ bundlePath: String) -> Bool {
@@ -50,9 +57,12 @@ public struct PendingOperations: Codable, Equatable, Sendable {
                             snapshot.problems.append("Unsupported journal schema at \(journalPath.path)")
                             continue
                         }
-                        if journal.state == .inProgress || journal.state == .recoveryFailed, belongs(journal.bundlePath) {
+                        guard belongs(journal.bundlePath) else { continue }
+                        if journal.state == .inProgress || journal.state == .recoveryFailed {
                             snapshot.operations.append(.init(journalPath: journalPath.path, bundlePath: journal.bundlePath, state: journal.state.rawValue))
                         }
+                        backups.add(journal, staging: journalPath.deletingLastPathComponent().path,
+                                    restoreState: RetainedBackups.restoreState(tree, entry.name))
                     } catch {
                         snapshot.problems.append("Cannot inspect journal at \(journalPath.path): \(error)")
                     }
@@ -63,6 +73,73 @@ public struct PendingOperations: Codable, Equatable, Sendable {
         }
         snapshot.operations.sort { $0.journalPath < $1.journalPath }
         snapshot.problems.sort()
-        return snapshot
+        backups.sets.sort { $0.stagingPath < $1.stagingPath }
+        return (snapshot, backups)
+    }
+}
+
+/// Backups kept beside the scanned apps, from the same unlocked snapshot as
+/// `PendingOperations`. Backups keep the original blocks allocated, so until
+/// an app's backups are released, thinning adds the thinned files' size to
+/// disk usage instead of saving the removed bytes. Both are logical sizes.
+public struct RetainedBackups: Codable, Equatable, Sendable {
+    public struct BackupSet: Codable, Equatable, Sendable {
+        public let bundlePath: String
+        public let stagingPath: String
+        /// The operation's journal state.
+        public let state: String
+        /// The state of the last restore from this set, when one ran;
+        /// "unreadable" when its record cannot be read.
+        public let restoreState: String?
+        /// The logical size of the backups kept.
+        public let retainedBytes: UInt64
+        /// Logical bytes the operation removed from the app and that are
+        /// still removed: zero once rolled back or restored.
+        public let removedBytes: UInt64
+    }
+
+    public var sets: [BackupSet] = []
+    public var retainedBytes: UInt64 { sets.map(\.retainedBytes).reduce(0, +) }
+    public var removedBytes: UInt64 { sets.map(\.removedBytes).reduce(0, +) }
+
+    enum CodingKeys: String, CodingKey { case sets, retainedBytes, removedBytes }
+
+    public init() {}
+
+    public init(from decoder: any Decoder) throws {
+        sets = try decoder.container(keyedBy: CodingKeys.self).decode([BackupSet].self, forKey: .sets)
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(sets, forKey: .sets)
+        try container.encode(retainedBytes, forKey: .retainedBytes)
+        try container.encode(removedBytes, forKey: .removedBytes)
+    }
+
+    mutating func add(_ journal: Journal, staging: String, restoreState: String?) {
+        let stillRemoved = journal.state == .committed && restoreState != "restored"
+        sets.append(BackupSet(
+            bundlePath: journal.bundlePath, stagingPath: staging, state: journal.state.rawValue,
+            restoreState: restoreState,
+            retainedBytes: journal.entries.map(\.originalSize).reduce(0, +),
+            removedBytes: stillRemoved
+                ? journal.entries.filter { $0.state == .committed }
+                    .map { $0.originalSize - min($0.thinnedSize ?? $0.originalSize, $0.originalSize) }.reduce(0, +)
+                : 0))
+    }
+
+    /// Read with the no-follow reader, like the journal beside it.
+    static func restoreState(_ tree: FileTree, _ staging: String) -> String? {
+        let name = RestoreOperation.RestoreRecord.fileName
+        let kind: FileTree.Kind?
+        do { kind = try tree.kind([staging, name]) } catch { return "unreadable" }
+        guard let kind else { return nil }
+        guard kind == .regular,
+              let data = try? tree.read([staging, name], limit: 16 << 20),
+              let record = try? JSONDecoder().decode(RestoreOperation.RestoreRecord.self, from: data) else {
+            return "unreadable"
+        }
+        return record.state.rawValue
     }
 }

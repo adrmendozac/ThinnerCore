@@ -10,7 +10,7 @@ import Foundation
 /// fields are omitted when absent. Bump `currentSchemaVersion` on any change
 /// a consumer could notice.
 public struct ScanReport: Codable, Equatable, Sendable {
-    public static let currentSchemaVersion = 2
+    public static let currentSchemaVersion = 3
 
     public struct Tool: Codable, Equatable, Sendable {
         public let name: String
@@ -82,6 +82,8 @@ public struct ScanReport: Codable, Equatable, Sendable {
     }
 
     public let pendingOperations: PendingOperations
+    /// Backups kept for the scanned apps, beside the bytes thinning removed.
+    public let backups: RetainedBackups
     public let schemaVersion: Int
     public let tool: Tool
     /// Always true for a scan: nothing on disk was changed.
@@ -104,7 +106,7 @@ public struct ScanReport: Codable, Equatable, Sendable {
         tool = Tool(name: "thinnercore", version: ThinnerCore.version)
         dryRun = true
         self.root = root.path
-        pendingOperations = PendingOperations.read(root: root, apps: result.apps.map(\.url))
+        (pendingOperations, backups) = PendingOperations.snapshot(root: root, apps: result.apps.map(\.url))
         complete = result.isComplete && pendingOperations.problems.isEmpty
         self.excludes = excludes.map(\.path)
         missingExclusions = result.missingExclusions

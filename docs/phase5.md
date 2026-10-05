@@ -28,8 +28,10 @@ other apps in a future enabled batch have been rolled back. This build's
 release refusal ensures apply returns at least 1.
 
 Scan JSON schema 2 adds `pendingOperations`: operations, problems, and
-searched directories. The snapshot reads UUID-named staging directories
-beside the scan root and discovered apps, without locking or changing them.
+searched directories. Schema 3 adds `backups`: retained backup bytes beside
+the bytes thinning removed, per backup set and in total. The snapshot reads
+UUID-named staging directories beside the scan root and discovered apps,
+without locking or changing them.
 It is not a global restore index. It can become stale during another run.
 An unreadable, malformed, unsafe, or unsupported journal makes the scan
 incomplete (exit 1); a readable pending operation alone does not. A mutation

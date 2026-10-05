@@ -80,7 +80,8 @@ struct StagingArea {
 
     /// Creates a staging directory next to the bundle, on the same volume.
     /// The directory name includes the operation ID for uniqueness.
-    init(bundlePath: URL, operationID: String, requiredBytes: UInt64) throws(Problem) {
+    init(bundlePath: URL, operationID: String, requiredBytes: UInt64,
+         freeSpace: (statfs) -> UInt64 = StagingArea.available) throws(Problem) {
         let parent = bundlePath.deletingLastPathComponent()
         let name = ".thinner-\(operationID)"
         root = parent.appending(path: name)
@@ -108,11 +109,10 @@ struct StagingArea {
             throw Problem("volume is not APFS (\(fsTypeName)); clonefile backups require APFS")
         }
         
-        let freeBytes = UInt64(bundleStat.f_bavail) * UInt64(bundleStat.f_bsize)
-        let reserve: UInt64 = 2 * 1024 * 1024 * 1024 // 2 GiB
-        let totalRequired = requiredBytes + reserve
+        let freeBytes = freeSpace(bundleStat)
+        let totalRequired = requiredBytes + Self.reserve
         guard freeBytes >= totalRequired else {
-            throw Problem("insufficient free space: need \(totalRequired) bytes, have \(freeBytes)")
+            throw Problem("insufficient free space: need \(totalRequired) bytes (the thinned files plus a 2 GiB reserve), have \(freeBytes). Nothing was changed")
         }
 
         do {
@@ -123,6 +123,15 @@ struct StagingArea {
         }
     }
     
+    /// Free space kept beyond the thinned files, which are new data while
+    /// their backups are retained.
+    static let reserve: UInt64 = 2 << 30
+
+    /// Bytes available to an unprivileged writer on the volume.
+    static func available(_ volume: statfs) -> UInt64 {
+        UInt64(volume.f_bavail) * UInt64(volume.f_bsize)
+    }
+
     /// Initializes from an existing staging root directory (used for recovery).
     init(existingRoot: URL) {
         self.root = existingRoot

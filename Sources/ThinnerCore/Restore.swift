@@ -74,6 +74,10 @@ public enum RestoreOperation {
         // Internal fault-injection seams; never exposed by the CLI/library API.
         var boundary: (String, String) -> Void = { _, _ in }
         var flushDirectory: (String) -> String? = syncDirectory
+        var host: () -> HostGate.Refusal? = HostGate.check
+        var euid: () -> uid_t = { geteuid() }
+        /// Bytes available to this run on the volume `statfs` describes.
+        var freeSpace: (statfs) -> UInt64 = StagingArea.available
     }
 
     /// The restore. Internal so tests can run it; library clients reach only
@@ -147,6 +151,14 @@ public enum RestoreOperation {
         guard !sets.isEmpty, operation == nil || otherVersions.isEmpty else {
             let recorded = otherVersions.compactMap(\.identity).map(\.description).joined(separator: "; ")
             throw Problem("the app changed since it was thinned, most likely by an update (thinned: \(recorded); now: \(current)). Backups from another version are never restored into it")
+        }
+
+        // Before the first write to a set: its lock file and restore record.
+        for set in sets {
+            if let refusal = StagingOwner.refusal(set.staging, euid: env.euid(),
+                                                  rerun: operation == nil ? "restore" : "recover", app: real) {
+                throw Problem(refusal)
+            }
         }
 
         // Held until this function returns.

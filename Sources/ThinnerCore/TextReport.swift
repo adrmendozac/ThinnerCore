@@ -55,6 +55,13 @@ public enum TextReport {
             lines += report.pendingOperations.problems.map { "  \($0)" }
             lines.append("No recovery was attempted. Keep all backups.")
         }
+        if !report.backups.sets.isEmpty {
+            let backups = report.backups
+            lines.append("")
+            lines.append("Retained backups: \(count(backups.sets.count, "backup set")) · \(bytes(backups.retainedBytes)) kept"
+                + " · \(bytes(backups.removedBytes)) removed by thinning")
+            lines.append("Disk usage grows by the thinned files' size until an app's backups are released; both are logical sizes.")
+        }
         lines.append("")
         if totals.issues > 0 {
             lines.append("Incomplete scan: \(count(totals.issues, "path")) could not be read; counts are lower bounds.")
