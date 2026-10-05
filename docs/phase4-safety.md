@@ -3,8 +3,9 @@
 The writer now rechecks the original SHA-256 and file identity immediately
 before replacement, after process inspection. Copying metadata uses open
 file descriptors and compares owner, group, mode, flags, the extended ACL,
-and every extended attribute. No provenance exemption is made: a mismatch
-refuses the replacement.
+and every extended attribute except `com.apple.provenance`, which macOS sets
+from the writing process and cannot be reproduced (the exemption recorded
+in `CLAUDE.md`, "Write path"). Any other mismatch refuses the replacement.
 
 Journal directory-open/flush errors propagate to the caller. Writer flush
 errors trigger recovery through the retained backup; restore flush errors
