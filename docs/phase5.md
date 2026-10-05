@@ -6,6 +6,17 @@ Incomplete process visibility refuses the app. Modification remains disabled
 in both the CLI and public library while Phases 0, 4, and 6 are incomplete.
 There is no environment variable or force flag that enables it.
 
+An internal, fixture-tested batch coordinator is ready for the later release
+gate: it reuses the audited per-app writer, preserves user exclusions, blocks
+new writes when a pending or unreadable journal is found, and maps commit,
+rollback, and recovery outcomes to the stable report codes. A writer error is
+judged by what is on disk: an unfinished or unreadable journal for that app
+means recovery pending and stops the batch; no journal means nothing was
+written, so it is a refusal and the batch continues. Invalid or unreadable app
+metadata is a refusal, while an explicit policy skip remains a successful
+skip. The coordinator has no public entry point; the CLI still cannot modify
+apps.
+
 `thinnercore restore APP --json` and `thinnercore recover PATH --json` reserve the
 command/report interfaces; they do not yet restore or recover files.
 

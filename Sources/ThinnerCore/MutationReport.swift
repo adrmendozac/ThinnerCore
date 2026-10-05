@@ -49,7 +49,7 @@ public enum MutationCommands {
         let snapshot = PendingOperations.read(root: root, apps: scan.apps.map(\.url))
         var apps = scan.apps.map { app -> MutationReport.App in
             if let skip = app.skip {
-                return .init(path: app.url.path, outcome: .skipped, reason: skip.description)
+                return .init(path: app.url.path, outcome: skip.mutationOutcome, reason: skip.description)
             }
             if !app.issues.isEmpty {
                 return .init(path: app.url.path, outcome: .refused, reason: "Incomplete app scan; resolve unreadable paths before retrying.")
