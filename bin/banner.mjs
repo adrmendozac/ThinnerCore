@@ -1,20 +1,21 @@
 import React, {useEffect, useState} from 'react';
 import {Text, useStdout} from 'ink';
 
+// A compact three-row block font: big enough to read as a title, small
+// enough not to push the report off screen.
 const letters = {
-  t: ['████████╗', '╚══██╔══╝', '   ██║   ', '   ██║   ', '   ██║   ', '   ╚═╝   '],
-  h: ['██╗  ██╗', '██║  ██║', '███████║', '██╔══██║', '██║  ██║', '╚═╝  ╚═╝'],
-  i: ['██╗', '██║', '██║', '██║', '██║', '╚═╝'],
-  n: ['███╗   ██╗', '████╗  ██║', '██╔██╗ ██║', '██║╚██╗██║', '██║ ╚████║', '╚═╝  ╚═══╝'],
-  e: ['███████╗', '██╔════╝', '█████╗  ', '██╔══╝  ', '███████╗', '╚══════╝'],
-  r: ['██████╗ ', '██╔══██╗', '██████╔╝', '██╔══██╗', '██║  ██║', '╚═╝  ╚═╝'],
-  c: [' ██████╗', '██╔════╝', '██║     ', '██║     ', '╚██████╗', ' ╚═════╝'],
-  o: [' ██████╗ ', '██╔═══██╗', '██║   ██║', '██║   ██║', '╚██████╔╝', ' ╚═════╝ '],
+  t: ['▀█▀', ' █ ', ' ▀ '],
+  h: ['█ █', '█▀█', '▀ ▀'],
+  i: ['█', '█', '▀'],
+  n: ['█▄ █', '█ ▀█', '▀  ▀'],
+  e: ['█▀▀', '█▀▀', '▀▀▀'],
+  r: ['█▀█', '█▀▄', '▀ ▀'],
+  c: ['█▀▀', '█  ', '▀▀▀'],
+  o: ['█▀█', '█ █', '▀▀▀'],
 };
-const word = value => Array.from({length: 6}, (_, row) =>
-  [...value].map(letter => letters[letter][row]).join(''));
+const word = value => Array.from({length: 3}, (_, row) =>
+  [...value].map(letter => letters[letter][row]).join(' '));
 const full = word('thinnercore');
-const stacked = [...word('thinner'), '', ...word('core')];
 const fits = (rows, width) => rows.every(row => row.length <= width);
 
 export function Banner({color = true}) {
@@ -26,5 +27,5 @@ export function Banner({color = true}) {
     return () => stdout.off('resize', resize);
   }, [stdout]);
   return React.createElement(Text, {bold: true, ...(color ? {color: 'cyan'} : {})},
-    fits(full, width) ? full.join('\n') : fits(stacked, width) ? stacked.join('\n') : 'thinnercore');
+    fits(full, width) ? full.join('\n') : 'thinnercore');
 }

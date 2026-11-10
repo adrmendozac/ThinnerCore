@@ -4,6 +4,7 @@
     "react": "^19.3.0"
   },
   "name": "thinnercore",
+  "license": "MIT",
   "private": true,
   "type": "module",
   "bin": {
