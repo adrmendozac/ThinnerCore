@@ -8,6 +8,9 @@ public enum ThinOperation {
         case recoveryFailed(reason: String)
         case pending(reason: String)
         case skipped(reason: String)
+        /// The operation's app is gone or was replaced; see
+        /// `Journal.OperationState.superseded`. Nothing was changed.
+        case superseded(reason: String)
     }
 
     /// What tests replace: process inspection, `codesign --verify`, step
@@ -15,15 +18,15 @@ public enum ThinOperation {
     typealias Environment = RestoreOperation.Environment
 
     public static func apply(to bundleURL: URL) throws(Problem) -> Outcome {
-        // The unfinished transaction implementation must not be reachable by
-        // library clients either. There is deliberately no runtime override.
-        .skipped(reason: MutationCommands.releaseBlock)
+        guard MutationReleaseGate.isOpen else { return .skipped(reason: MutationCommands.releaseBlock) }
+        return try applyUnreleased(to: bundleURL)
     }
 
     /// Recovers interrupted operations on the app at `app`. Recovery changes
     /// the app, so it is held back by the same release gate as `apply`.
     public static func recover(_ app: URL) -> Outcome {
-        .skipped(reason: MutationCommands.releaseBlock)
+        guard MutationReleaseGate.isOpen else { return .skipped(reason: MutationCommands.releaseBlock) }
+        return recoverUnreleased(app)
     }
 
     // MARK: - Writer
@@ -75,6 +78,8 @@ public enum ThinOperation {
             for set in pending {
                 let outcome = try recover(set, bundle: bundle, env: env)
                 // Do not immediately retry an operation that just rolled back.
+                // A superseded one belonged to another version: thin this one.
+                if case .superseded = outcome { continue }
                 guard outcome == .committed else { return outcome }
             }
             scan = AppScanner.scan(bundle, options: options)
@@ -113,6 +118,7 @@ public enum ThinOperation {
             return 0
         }.reduce(0, +)
 
+        StagingArea.removeAbandonedPreparations(of: real, euid: env.euid())
         let operationID = UUID().uuidString
         let staging = try StagingArea(bundlePath: bundle, operationID: operationID, requiredBytes: requiredBytes,
                                       freeSpace: env.freeSpace)
@@ -130,11 +136,22 @@ public enum ThinOperation {
                 return nil
             }
         )
-        try journal.persist(to: staging.journalPath)
+        try staging.activate(with: journal, boundary: { env.boundary($0, "") })
         env.boundary("operation-journal", "")
 
+        // The app this operation set out to thin: the same directory, at
+        // the same version. An updater can replace the bundle between steps
+        // while nothing from it runs, and a path alone would then lead the
+        // writer into the new version under the old version's checks.
+        let sameApp = { () -> String? in
+            guard lock.stillHolds(real) else { return "\(real) was replaced by another directory" }
+            guard let now = try? AppIdentity.of(bundle) else { return "cannot read the identity of \(real)" }
+            return now == identity ? nil : "the app changed during the operation (then: \(identity); now: \(now))"
+        }
+
         do {
-            try executeSwaps(journal: &journal, eligibleFiles: eligibleFiles, staging: staging, bundle: bundle, env: env)
+            try executeSwaps(journal: &journal, eligibleFiles: eligibleFiles, staging: staging, bundle: bundle,
+                             sameApp: sameApp, env: env)
         } catch {
             return rollback(&journal, journalPath: staging.journalPath, bundle: bundle, env: env, reason: "mutation failed: \(error.description)")
         }
@@ -142,6 +159,9 @@ public enum ThinOperation {
         // Verify app after swaps
         if let verifyError = env.verify(bundle) {
             return rollback(&journal, journalPath: staging.journalPath, bundle: bundle, env: env, reason: "verification failed after thinning: \(verifyError)")
+        }
+        if let changed = sameApp() {
+            return rollback(&journal, journalPath: staging.journalPath, bundle: bundle, env: env, reason: changed)
         }
 
         // Check thinned hashes
@@ -162,13 +182,20 @@ public enum ThinOperation {
         }
         env.boundary("verified", "")
         journal.state = .committed
-        try journal.persist(to: staging.journalPath)
+        do {
+            try journal.persist(to: staging.journalPath, flushDirectory: env.flushDirectory)
+        } catch {
+            // The rename may already expose a committed journal even though
+            // its directory flush failed. The app has changed; an unlocked
+            // search for unfinished journals cannot establish durability.
+            return .pending(reason: "App thinned and verified, but the commit journal could not be durably saved: \(error.description). Keep all backups and inspect \(staging.journalPath.path) before retrying.")
+        }
         env.boundary("committed", "")
         return .committed
     }
 
     private static func executeSwaps(journal: inout Journal, eligibleFiles: [WalkedFile], staging: StagingArea,
-                                     bundle: URL, env: Environment) throws(Problem) {
+                                     bundle: URL, sameApp: () -> String?, env: Environment) throws(Problem) {
         let CLONE_NOFOLLOW: UInt32 = 1
 
         for file in eligibleFiles {
@@ -187,11 +214,17 @@ public enum ThinOperation {
             guard case let .fat(fatBinary) = parsedOriginalFatBinary else {
                 throw Problem("Failed to parse fat binary at \(targetPath)")
             }
-            guard let arm64Slice = fatBinary.slices.first(where: { $0.arch == .arm64 }) else {
+            // Every slice that stays, arm64 among them, must come out of lipo
+            // byte for byte: their signatures are what keeps the file valid.
+            let kept = fatBinary.slices.filter { !removals.contains($0.arch) }
+            guard kept.contains(where: { $0.arch == .arm64 }) else {
                 throw Problem("Missing arm64 slice in \(targetPath)")
             }
-
-            let originalArm64Hash = try SHA256.hash(file: targetPath, offset: arm64Slice.offset, count: arm64Slice.size)
+            var keptHashes: [Arch: String] = [:]
+            for slice in kept {
+                keptHashes[slice.arch] = try SHA256.hash(file: targetPath, offset: slice.offset, count: slice.size)
+            }
+            let originalArm64Hash = keptHashes[.arm64]!
             guard let identity = FileIdentity.of(targetPath) else {
                 throw Problem("Cannot stat \(targetPath)")
             }
@@ -199,7 +232,7 @@ public enum ThinOperation {
             env.boundary("original-hashed", file.relativePath)
             // 2. clonefile backup
             if clonefile(targetPath, backupURL.path, CLONE_NOFOLLOW) != 0 {
-                throw Problem("clonefile failed for \(targetPath): \(errnoDescription())")
+                throw Problem("cannot back up \(file.relativePath): \(PermissionDiagnostic.describe(errno, path: backupURL.path))")
             }
             let backupHash = try SHA256.hash(file: backupURL.path)
             guard backupHash == originalHash else {
@@ -207,8 +240,8 @@ public enum ThinOperation {
             }
 
             env.boundary("backup-verified", file.relativePath)
-            // 3. lipo -remove
-            try Lipo.remove(architectures: removals, from: targetPath, to: tempURL.path)
+            // 3. remove the slices, as `lipo -remove` would
+            try SliceRemover.remove(removals, from: targetPath, to: tempURL.path)
 
             env.boundary("lipo-written", file.relativePath)
             // 4. validate temp
@@ -225,13 +258,14 @@ public enum ThinOperation {
             guard case let .fat(tempFatBinary) = parsedTempFatBinary else {
                 throw Problem("Failed to parse thinned fat binary at \(tempURL.path)")
             }
-            guard let tempArm64Slice = tempFatBinary.slices.first(where: { $0.arch == .arm64 }) else {
-                throw Problem("Missing arm64 slice in thinned file \(tempURL.path)")
+            guard Set(tempFatBinary.slices.map(\.arch)) == Set(kept.map(\.arch)) else {
+                throw Problem("thinned file \(tempURL.path) has slices \(tempFatBinary.slices.map(\.arch)), expected \(kept.map(\.arch))")
             }
-
-            let tempArm64Hash = try SHA256.hash(file: tempURL.path, offset: tempArm64Slice.offset, count: tempArm64Slice.size)
-            guard tempArm64Hash == originalArm64Hash else {
-                throw Problem("arm64 slice hash changed after thinning \(targetPath)")
+            for slice in tempFatBinary.slices {
+                let hash = try SHA256.hash(file: tempURL.path, offset: slice.offset, count: slice.size)
+                guard hash == keptHashes[slice.arch] else {
+                    throw Problem("\(slice.arch) slice hash changed after thinning \(targetPath)")
+                }
             }
 
             let thinnedHash = try SHA256.hash(file: tempURL.path)
@@ -274,14 +308,17 @@ public enum ThinOperation {
             if let busy = idleRefusal(bundle, env) {
                 throw Problem("stopped before replacing \(file.relativePath): \(busy)")
             }
+            if let changed = sameApp() {
+                throw Problem("stopped before replacing \(file.relativePath): \(changed)")
+            }
             guard FileIdentity.of(targetPath) == identity,
                   try SHA256.hash(file: targetPath) == originalHash,
                   FileIdentity.of(targetPath) == identity else {
                 throw Problem("File identity or SHA-256 changed before swap for \(targetPath)")
             }
 
-            if rename(tempURL.path, targetPath) != 0 {
-                throw Problem("rename failed for \(targetPath): \(errnoDescription())")
+            if let problem = PathSafety.renameNoFollow(tempURL.path, targetPath) {
+                throw Problem("cannot move the thinned \(file.relativePath) into place: \(problem)")
             }
 
             env.boundary("swapped", file.relativePath)
@@ -365,6 +402,9 @@ public enum ThinOperation {
         let real: String
         let lock: AppLock
         do {
+            if let missing = try RestoreOperation.missingAppPath(app) {
+                return supersede(missingApp: missing, env: env)
+            }
             real = try RestoreOperation.resolve(app)
             lock = try AppLock(real)
         } catch {
@@ -408,7 +448,7 @@ public enum ThinOperation {
         }
         let current = try AppIdentity.of(bundle)
         guard recorded == current else {
-            return .recoveryFailed(reason: "the app changed since the interrupted operation, most likely by an update (then: \(recorded); now: \(current)). Nothing was changed; every backup in \(set.staging.path) is kept")
+            return try supersede(set, journal: &journal, at: journalPath, bundle: bundle, recorded: recorded, current: current)
         }
 
         let tree = try FileTree(bundle)
@@ -474,10 +514,71 @@ public enum ThinOperation {
                         reason: "the app does not verify after the interrupted operation")
     }
 
+    /// An update replaced the app since the interrupted operation. If none of
+    /// the operation's thinned files is still in it, there is nothing left to
+    /// recover: mark the operation superseded so it stops blocking. If one
+    /// is, the operation's change is still in the app and cannot be undone
+    /// into a different version, so recovery fails as before.
+    private static func supersede(_ set: RestoreOperation.BackupSet, journal: inout Journal, at journalPath: URL,
+                                  bundle: URL, recorded: AppIdentity, current: AppIdentity) throws(Problem) -> Outcome {
+        let tree = try FileTree(bundle)
+        var stillThinned: [String] = []
+        for entry in journal.entries {
+            guard let parts = RestoreOperation.safeComponents(entry.relativePath) else {
+                throw Problem("the journal names an unsafe path: \(entry.relativePath)")
+            }
+            guard try tree.kind(parts) == .regular, let thinned = entry.thinnedHash else { continue }
+            if try SHA256.hash(file: bundle.path + "/" + entry.relativePath) == thinned {
+                stillThinned.append(entry.relativePath)
+            }
+        }
+        guard stillThinned.isEmpty else {
+            return .recoveryFailed(reason: "the app changed since the interrupted operation, most likely by an update (then: \(recorded); now: \(current)), but still holds thinned files from it: \(stillThinned.sorted().joined(separator: ", ")). Its backups belong to the earlier version and are never restored into this one. Reinstall the app, then run recover again. Nothing was changed; every backup in \(set.staging.path) is kept")
+        }
+        journal.state = .superseded
+        try journal.persist(to: journalPath)
+        return .superseded(reason: "the app was replaced since the interrupted operation, most likely by an update (then: \(recorded); now: \(current)), and none of its thinned files remain, so there is nothing to recover. Nothing was changed; its backups are kept in \(set.staging.path) until you release them")
+    }
+
+    /// The app an unfinished operation changed no longer exists. Nothing can
+    /// use or change it, so the operations stop blocking; the backups are
+    /// kept. Each set's `StagingLock` excludes a concurrent recover, restore,
+    /// or release of the same backups.
+    private static func supersede(missingApp real: String, env: Environment) -> Outcome {
+        do {
+            let sets = try RestoreOperation.findBackupSets(for: real)
+                .filter { $0.journal.state == .inProgress || $0.journal.state == .recoveryFailed }
+            guard !sets.isEmpty else {
+                return .skipped(reason: "no unfinished operation was found for \(real)")
+            }
+            for set in sets {
+                if let refusal = StagingOwner.refusal(set.staging, euid: env.euid(), rerun: "recover", app: real) {
+                    return .pending(reason: refusal)
+                }
+            }
+            var locks: [StagingLock] = []
+            for set in sets { locks.append(try StagingLock(set.staging)) }
+            defer { withExtendedLifetime(locks) {} }
+            // It may have come back while the locks were taken.
+            guard try RestoreOperation.missingAppPath(URL(filePath: real)) != nil else {
+                return .pending(reason: "\(real) appeared while recovering; nothing was changed. Run recover again")
+            }
+            for set in sets {
+                var journal = set.journal
+                journal.state = .superseded
+                try journal.persist(to: set.staging.appending(path: Journal.fileName))
+            }
+            let kept = sets.map(\.staging.path).joined(separator: ", ")
+            return .superseded(reason: "the app is no longer at \(real), so its unfinished operation no longer applies. Nothing was changed; its backups are kept in \(kept). If you moved the app, move it back and run thinnercore restore to put its original files back; otherwise run thinnercore release \(StagingOwner.shellQuoted(real)) to delete them")
+        } catch {
+            return .recoveryFailed(reason: "Recovery refused, nothing was changed: \(error.description). Every backup is kept")
+        }
+    }
+
     /// Exit-code order: the worst outcome across operations wins.
     private static func severity(_ outcome: Outcome) -> Int {
         switch outcome {
-        case .committed, .skipped: 0
+        case .committed, .skipped, .superseded: 0
         case .rolledBack: 1
         case .pending: 3
         case .recoveryFailed: 4

@@ -3,29 +3,27 @@ import Foundation
 /// The system's own signature check, the authority over any reading of
 /// `CodeResources` this module does. Read-only.
 enum Codesign {
+    /// A deep check of the largest apps takes minutes; a timeout counts as
+    /// a failed verification.
+    static let timeout: TimeInterval = 1800
+
     /// Nil if the app verifies; otherwise what `codesign` objected to.
     static func verify(_ app: URL) -> String? {
-        let process = Process()
-        process.executableURL = URL(filePath: "/usr/bin/codesign")
-        process.arguments = ["--verify", "--deep", "--strict", "--all-architectures", app.path]
-        // One pipe for both streams, drained before waiting, so codesign can
-        // never block on a full buffer.
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
+        let result: Subprocess.Result
         do {
-            try process.run()
+            result = try Subprocess.run("/usr/bin/codesign",
+                                        ["--verify", "--deep", "--strict", "--all-architectures", app.path],
+                                        timeout: timeout)
         } catch {
-            return "cannot run codesign: \(error.localizedDescription)"
+            return error.description
         }
-        let output = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-        process.waitUntilExit()
-        guard process.terminationStatus != 0 else { return nil }
+        if result.timedOut { return "codesign did not finish within \(Int(timeout)) seconds" }
+        guard result.status != 0 else { return nil }
 
         // codesign prefixes its first line with the path it was given.
-        let lines = output.split(separator: "\n").map { line in
+        let lines = result.output.split(separator: "\n").map { line in
             line.hasPrefix(app.path + ": ") ? String(line.dropFirst(app.path.count + 2)) : String(line)
         }
-        return lines.isEmpty ? "codesign exited \(process.terminationStatus)" : lines.prefix(3).joined(separator: "; ")
+        return lines.isEmpty ? "codesign exited \(result.status)" : lines.prefix(3).joined(separator: "; ")
     }
 }

@@ -127,13 +127,37 @@ public struct FatBinary: Equatable, Sendable {
     /// remain, then each one at its alignment, in their original order. lipo
     /// keeps a fat header even when only one slice is left.
     public func size(removing archs: Set<Arch>) -> UInt64 {
-        let kept = slices.filter { !archs.contains($0.arch) }.sorted { $0.offset < $1.offset }
-        var end = UInt64(Self.headerLength(is64: is64, count: kept.count))
-        for slice in kept {
-            let alignment = UInt64(1) << slice.align
-            end = (end + alignment - 1) / alignment * alignment + slice.size
+        layout(removing: archs).size
+    }
+
+    /// What `lipo -remove` writes, and `SliceRemover` reproduces.
+    struct Layout {
+        /// `FAT_MAGIC_64` only when a 32-bit header cannot hold an offset or
+        /// size: lipo writes `FAT_MAGIC` even for a `FAT_MAGIC_64` input
+        /// (measured 2026-11-09, Xcode 26).
+        let is64: Bool
+        /// In header order, the input's.
+        let kept: [FatSlice]
+        /// Where each of `kept` goes in the output.
+        let offsets: [UInt64]
+        let size: UInt64
+    }
+
+    func layout(removing archs: Set<Arch>) -> Layout {
+        let kept = slices.filter { !archs.contains($0.arch) }
+        func place(is64: Bool) -> Layout {
+            var offsets = [UInt64](repeating: 0, count: kept.count)
+            var end = UInt64(Self.headerLength(is64: is64, count: kept.count))
+            for i in kept.indices.sorted(by: { kept[$0].offset < kept[$1].offset }) {
+                let alignment = UInt64(1) << kept[i].align
+                offsets[i] = (end + alignment - 1) / alignment * alignment
+                end = offsets[i] + kept[i].size
+            }
+            return Layout(is64: is64, kept: kept, offsets: offsets, size: end)
         }
-        return end
+        let narrow = place(is64: false)
+        let fits = zip(narrow.offsets, kept).allSatisfy { UInt32(exactly: $0) != nil && UInt32(exactly: $1.size) != nil }
+        return fits ? narrow : place(is64: true)
     }
 }
 
