@@ -31,6 +31,8 @@
 #     Contents/Frameworks/libintel.dylib                 x86_64 + x86_64h, no Apple Silicon
 #     Contents/Frameworks/libapple.dylib                 arm64 + arm64e, no Intel
 #     Contents/Frameworks/libthin.dylib                  arm64 only, not universal
+#   bundles/RunningHelper.app        stays alive for process-detection tests
+#   bundles/NoCurrent.framework      signed Versions/A, no Current symlink
 #   bundles/Multi.framework           Versions/A (Current) and Versions/B, each signed
 #   bundles/Electron.app              the layout of a universal Electron app:
 #     Contents/MacOS/Electron                            main executable
@@ -238,6 +240,42 @@ codesign --verify --deep --strict --all-architectures "$APP"
 # requirement names exact cdhashes, which only the Current version matches.
 
 framework "$OUT/bundles/Multi.framework" dev.thinner.fixture.multi B A
+
+# --- Missing Current link and a reusable running helper -----------------------
+
+FW="$OUT/bundles/NoCurrent.framework"
+mkdir -p "$FW/Versions/A/Resources"
+dylib "$FW/Versions/A/NoCurrent" @rpath/NoCurrent.framework/Versions/A/NoCurrent arm64 x86_64
+plist "$FW/Versions/A/Resources/Info.plist" dev.thinner.fixture.nocurrent NoCurrent FMWK
+codesign --sign - "$FW/Versions/A"
+# No top-level links: the classifier must not guess which version is current.
+
+APP="$OUT/bundles/RunningHelper.app"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+cat > "$SRC/runner.c" <<'EOF'
+#include <fcntl.h>
+#include <string.h>
+#include <unistd.h>
+__attribute__((used)) static const char padding[65536] = {1};
+int main(int argc, char **argv) {
+    int fd = -1;
+    if (argc == 3 && strcmp(argv[1], "--hold-file") == 0) {
+        fd = open(argv[2], O_RDONLY);
+        if (fd < 0) return 1;
+    } else if (argc != 1) {
+        return 2;
+    }
+    // Exit on SIGTERM, or after 30 seconds if a test fails to clean up.
+    sleep(30);
+    if (fd >= 0) close(fd);
+    return padding[0] - 1;
+}
+EOF
+clang -arch arm64 -arch x86_64 $MIN "$SRC/runner.c" -o "$APP/Contents/MacOS/RunningHelper"
+plist "$APP/Contents/Info.plist" dev.thinner.fixture.running RunningHelper APPL
+printf 'helper fixture resource\n' > "$APP/Contents/Resources/note.txt"
+codesign --sign - "$APP"
+codesign --verify --deep --strict --all-architectures "$APP"
 
 # --- Electron.app -------------------------------------------------------------
 # Electron Framework keeps dylibs in Versions/A/Libraries. That is not a

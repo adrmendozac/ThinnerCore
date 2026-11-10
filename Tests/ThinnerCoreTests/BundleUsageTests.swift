@@ -2,8 +2,8 @@ import Foundation
 import Testing
 @testable import ThinnerCore
 
-/// Running-process detection on disposable directories, with copies of
-/// `/bin/sleep` and `/usr/bin/tail` as the processes. Never an installed app.
+/// Running-process detection using the generated helper on disposable copies.
+/// Never launches or changes an installed app.
 @Suite struct BundleUsageTests {
     let dir: URL
     let bundle: URL
@@ -11,9 +11,9 @@ import Testing
     init() throws {
         dir = FileManager.default.temporaryDirectory.appending(path: "thinner-usage-\(UUID().uuidString)")
         bundle = dir.appending(path: "Fake.app")
-        try FileManager.default.createDirectory(at: bundle.appending(path: "Contents/MacOS"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try FileManager.default.copyItem(at: Fixtures.url("bundles/RunningHelper.app"), to: bundle)
         try Data("data".utf8).write(to: bundle.appending(path: "Contents/data.txt"))
-        try FileManager.default.copyItem(atPath: "/bin/sleep", toPath: bundle.appending(path: "Contents/MacOS/sleeper").path)
     }
 
     func remove() {
@@ -78,15 +78,19 @@ import Testing
 
     @Test func findsAnExecutableInsideTheBundle() throws {
         defer { remove() }
-        let process = try start(bundle.appending(path: "Contents/MacOS/sleeper").path, ["30"])
+        let process = try start(bundle.appending(path: "Contents/MacOS/RunningHelper").path, [])
         defer { stop(process) }
         let use = try waitForUse(by: process.processIdentifier)
         #expect(use?.how == .executable)
+        let refusal = ThinOperation.idleRefusal(bundle, .init())
+        #expect(refusal?.contains("the app is in use:") == true)
+        #expect(refusal?.contains(String(process.processIdentifier)) == true)
     }
 
     @Test func findsAFileHeldOpenByAnOutsideProcess() throws {
         defer { remove() }
-        let process = try start("/usr/bin/tail", ["-f", bundle.appending(path: "Contents/data.txt").path])
+        let process = try start(Fixtures.url("bundles/RunningHelper.app/Contents/MacOS/RunningHelper").path,
+                                ["--hold-file", bundle.appending(path: "Contents/data.txt").path])
         defer { stop(process) }
         let use = try waitForUse(by: process.processIdentifier)
         #expect(use?.how == .open)
@@ -97,8 +101,8 @@ import Testing
     @Test func findsABundleExecutableRunThroughAHardLink() throws {
         defer { remove() }
         let link = dir.appending(path: "outside-link").path
-        try #require(Darwin.link(bundle.appending(path: "Contents/MacOS/sleeper").path, link) == 0)
-        let process = try start(link, ["30"])
+        try #require(Darwin.link(bundle.appending(path: "Contents/MacOS/RunningHelper").path, link) == 0)
+        let process = try start(link, [])
         defer { stop(process) }
         #expect(try waitForUse(by: process.processIdentifier) != nil)
     }

@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+@testable import ThinnerCore
 
 /// Checks that the fixture generator produces what every later phase assumes.
 /// If one of these fails, classifier and writer tests built on the fixtures
@@ -17,6 +18,8 @@ import Testing
     static let thin64: [UInt8] = [0xCF, 0xFA, 0xED, 0xFE] // MH_MAGIC_64, little-endian on disk
 
     static let machOCases: [MachOCase] = [
+        .init(path: "bundles/RunningHelper.app/Contents/MacOS/RunningHelper", magic: fat, archs: ["arm64", "x86_64"]),
+        .init(path: "bundles/NoCurrent.framework/Versions/A/NoCurrent", magic: fat, archs: ["arm64", "x86_64"]),
         .init(path: "macho/fat-arm64-x86_64", magic: fat, archs: ["arm64", "x86_64"]),
         .init(path: "macho/fat-arm64e-x86_64", magic: fat, archs: ["arm64e", "x86_64"]),
         .init(path: "macho/fat-arm64-x86_64-x86_64h", magic: fat, archs: ["arm64", "x86_64", "x86_64h"]),
@@ -145,6 +148,20 @@ import Testing
         #expect(try fm.destinationOfSymbolicLink(atPath: framework.appending(path: "Versions/Current").path) == "A")
         #expect(try fm.destinationOfSymbolicLink(atPath: framework.appending(path: "Foo").path) == "Versions/Current/Foo")
         #expect(try fm.destinationOfSymbolicLink(atPath: framework.appending(path: "Resources").path) == "Versions/Current/Resources")
+    }
+
+    @Test func missingCurrentFrameworkIsInventoriedButNeverEligible() throws {
+        let framework = try Fixtures.url("bundles/NoCurrent.framework")
+        #expect(!FileManager.default.fileExists(atPath: framework.appending(path: "Versions/Current").path))
+        let verify = try Shell.run("/usr/bin/codesign", "--verify", "--strict", "--all-architectures",
+                                   framework.appending(path: "Versions/A").path)
+        #expect(verify.status == 0, "\(verify.output)")
+        let result = BundleClassifier.classify(framework)
+        #expect(result.files.count == 1)
+        let file = try #require(result.files.first)
+        #expect(file.relativePath == "Versions/A/NoCurrent")
+        #expect(!file.decision.isEligible)
+        #expect(String(describing: file.decision).contains("Current"))
     }
 
     private static func files2(_ codeResources: String) throws -> [String: [String: Any]] {
