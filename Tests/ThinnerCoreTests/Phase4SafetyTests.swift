@@ -57,6 +57,31 @@ final class Phase4CrashWorker: XCTestCase {
         #expect(try fixture.eligibleHashes() == originals)
     }
 
+    /// Regression: a crash after the staging directory was created but
+    /// before its journal existed left a journal-less `.thinner-<UUID>`
+    /// that made every later scan of the folder incomplete and blocked
+    /// apply and recover there for good.
+    @Test func crashWhilePreparingStagingLeavesNothingToRecover() throws {
+        let fixture = try ThinOperationTests()
+        defer { fixture.cleanUp() }
+        let originals = try fixture.eligibleHashes()
+        try crash(app: fixture.app, mode: "apply", at: "staging-prepared")
+
+        let leftovers = try FileManager.default.contentsOfDirectory(atPath: fixture.dir.path)
+        #expect(leftovers.filter(RestoreOperation.isStagingName).isEmpty)
+        #expect(leftovers.contains { $0.hasPrefix(StagingArea.preparingPrefix) })
+        let snapshot = PendingOperations.read(root: fixture.dir, apps: [fixture.app])
+        #expect(snapshot.problems.isEmpty && snapshot.operations.isEmpty, "\(snapshot)")
+        #expect(AppScanner.scan(fixture.dir, options: fixture.options).isComplete)
+        #expect(try fixture.eligibleHashes() == originals)
+
+        // The next apply removes what the crash left and thins normally.
+        #expect(try ThinOperation.applyUnreleased(to: fixture.app, options: fixture.options, environment: idleEnvironment) == .committed)
+        let after = try FileManager.default.contentsOfDirectory(atPath: fixture.dir.path)
+        #expect(!after.contains { $0.hasPrefix(StagingArea.preparingPrefix) }, "\(after)")
+        #expect(after.filter(RestoreOperation.isStagingName).count == 1)
+    }
+
     @Test(arguments: ["restore-journal", "restore-verified", "restore-committed"] +
           ["restore-prepared", "restore-before-swap", "restore-swapped", "restore-directory-flushed", "restore-recorded"].flatMap { point in (1...3).map { "\(point)#\($0)" } })
     func restoreSurvivesProcessExit(_ boundary: String) throws {

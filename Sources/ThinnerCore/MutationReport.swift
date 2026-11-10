@@ -4,10 +4,13 @@ import Foundation
 public struct MutationReport: Codable, Equatable, Sendable {
     public enum Outcome: String, Codable, Sendable {
         case committed, skipped, nothingToDo, refused, rolledBack, recoveryPending, recoveryFailed
+        /// Recovery found that the app the operation changed is gone or was
+        /// replaced; nothing was changed and the backups are kept.
+        case superseded
 
         public var exitCode: Int32 {
             switch self {
-            case .committed, .skipped, .nothingToDo: 0
+            case .committed, .skipped, .nothingToDo, .superseded: 0
             case .refused, .rolledBack: 1
             case .recoveryPending: 3
             case .recoveryFailed: 4
@@ -19,6 +22,26 @@ public struct MutationReport: Codable, Equatable, Sendable {
         public let path: String
         public let outcome: Outcome
         public let reason: String
+        public var restore: RestoreDetails? = nil
+        public var release: ReleaseDetails? = nil
+    }
+
+    /// Additive release details; absent from reports for other commands.
+    public struct ReleaseDetails: Codable, Equatable, Sendable {
+        /// True when nothing was deleted: `released` lists what would be.
+        public let dryRun: Bool
+        public let released: [String]
+        /// Logical size of the backups (that would be) deleted.
+        public let releasedBytes: UInt64
+        public let notes: [String]
+    }
+
+    /// Additive restore details; absent from reports for other commands.
+    public struct RestoreDetails: Codable, Equatable, Sendable {
+        public let restored: [String]
+        public let alreadyOriginal: [String]
+        public let backupLocations: [String]
+        public let notes: [String]
     }
 
     public var schemaVersion: Int = 1
@@ -34,7 +57,22 @@ public struct MutationReport: Codable, Equatable, Sendable {
     }
 
     public var text: String {
-        (apps.map { "\($0.path): \($0.outcome.rawValue) — \($0.reason)" } + problems)
+        (apps.flatMap { app -> [String] in
+            var lines = ["\(app.path): \(app.outcome.rawValue) — \(app.reason)"]
+            if let details = app.restore {
+                lines += details.restored.map { "  Restored: \($0)" }
+                lines += details.alreadyOriginal.map { "  Already original: \($0)" }
+                lines += details.backupLocations.map { "  Backups retained: \($0)" }
+                lines += details.notes.map { "  Note: \($0)" }
+            }
+            if let details = app.release {
+                let verb = details.dryRun ? "Would delete" : "Deleted"
+                lines += details.released.map { "  \(verb): \($0)" }
+                lines.append("  \(verb) \(details.releasedBytes) bytes of backups (logical size)")
+                lines += details.notes.map { "  Note: \($0)" }
+            }
+            return lines
+        } + problems)
             .map(TerminalText.sanitize).joined(separator: "\n")
     }
 }
@@ -45,6 +83,7 @@ public enum MutationCommands {
     public static let releaseBlock = "Modification is unavailable: Phase 0 permission and Gatekeeper gates, the audited writer, and Phase 6 restore/recovery validation must pass first. Continue using scan; keep all existing backups."
 
     public static func apply(_ root: URL, options: ScanOptions = ScanOptions()) -> MutationReport {
+        if MutationReleaseGate.isOpen { return applyUnreleased(root, options: options) }
         let scan = AppScanner.scan(root, options: options)
         let snapshot = PendingOperations.read(root: root, apps: scan.apps.map(\.url))
         var apps = scan.apps.map { app -> MutationReport.App in

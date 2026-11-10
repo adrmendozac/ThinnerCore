@@ -16,8 +16,9 @@ import Testing
             return .committed
         }
         #expect(report.exitCode == 0)
-        #expect(called.sorted() == ["Electron.app", "Nested.app", "Signed.app"])
-        #expect(report.apps.allSatisfy { $0.outcome == .committed })
+        // Nested.app holds Intel-only libraries: a policy skip, never written.
+        #expect(called.sorted() == ["Electron.app", "RunningHelper.app", "Signed.app"])
+        #expect(report.apps.map(\.outcome) == [.committed, .skipped, .committed, .committed])
     }
 
     @Test func exclusionNeverCallsWriter() throws {
@@ -114,8 +115,32 @@ import Testing
         }
         let report = MutationCommands.applyUnreleased(root, options: options(), operation: fail)
         #expect(calls == 3, "the batch continues: nothing was written")
-        #expect(report.apps.allSatisfy { $0.outcome == .refused })
+        #expect(report.apps.map(\.outcome) == [.refused, .skipped, .refused, .refused])
         #expect(report.exitCode == 1)
+    }
+
+    @Test func commitDirectoryFlushFailureReportsChangedAndStopsBatch() throws {
+        let root = try copiedBundles()
+        defer { try? FileManager.default.removeItem(at: root) }
+        var calls = 0
+        let operation: MutationCommands.ApplyOperation = { app, options throws(Problem) in
+            calls += 1
+            var verified = false
+            var env = idleEnvironment
+            env.boundary = { name, _ in if name == "verified" { verified = true } }
+            env.flushDirectory = { _ in verified ? "injected commit flush failure" : nil }
+            return try ThinOperation.applyUnreleased(to: app, options: options, environment: env)
+        }
+        let report = MutationCommands.applyUnreleased(root, options: options(), operation: operation)
+        #expect(calls == 1)
+        #expect(report.exitCode == 3)
+        #expect(report.apps.first?.outcome == .recoveryPending)
+        #expect(report.apps.first?.reason.contains("App thinned and verified") == true)
+        #expect(report.apps.dropFirst().allSatisfy { $0.outcome == .refused })
+        let sets = PendingOperations.snapshot(root: root, apps: []).backups.sets
+        #expect(sets.count == 1)
+        #expect(sets.first?.state == "committed", "rename succeeded before the injected flush failure")
+        #expect((sets.first?.retainedBytes ?? 0) > 0)
     }
 
     /// Regression: the writer records the real path (/private/var/...), the

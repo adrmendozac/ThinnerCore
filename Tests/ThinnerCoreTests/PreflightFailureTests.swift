@@ -168,6 +168,36 @@ import Testing
     }
 
     /// The scan shows retained backup bytes beside the bytes thinning removed.
+    @Test(arguments: [false, true])
+    func partialRestoreCountsOnlyFilesStillThinned(failFlush: Bool) throws {
+        let copy = try ThinnedCopy()
+        defer { copy.remove() }
+        var env = idleEnvironment
+        var swapped = false
+        env.boundary = { name, _ in if name == "restore-swapped" { swapped = true } }
+        if failFlush {
+            env.flushDirectory = { _ in "injected restore flush failure" }
+        } else {
+            env.usage = { _ throws(Problem) in BundleUsage.Result(uninspectable: swapped ? 1 : 0) }
+        }
+        #expect(RestoreOperation.restoreUnreleased(copy.app, environment: env).outcome.exitCode == 3)
+        var expected: UInt64 = 0
+        var originals = 0
+        for entry in copy.entries {
+            let hash = try SHA256.hash(file: copy.app.appending(path: entry.relativePath).path)
+            if hash == entry.originalHash { originals += 1 }
+            if hash == entry.thinnedHash { expected += entry.originalSize - entry.thinnedSize! }
+        }
+        #expect(originals == 1)
+        #expect(expected > 0)
+        let options = ScanOptions(launchServicesPreferences: copy.dir.appending(path: "no-prefs.plist"))
+        let report = ScanReport(root: copy.dir, excludes: [], result: AppScanner.scan(copy.dir, options: options))
+        #expect(report.backups.removedBytes == expected)
+        #expect(report.backups.retainedBytes == copy.entries.map(\.originalSize).reduce(0, +))
+        let json = try #require(JSONSerialization.jsonObject(with: Data(report.json().utf8)) as? [String: Any])
+        #expect((json["backups"] as? [String: Any])?["removedBytes"] as? Int == Int(expected))
+    }
+
     @Test func scanReportsRetainedBackupsBesideRemovedBytes() throws {
         let copy = try ThinnedCopy()
         defer { copy.remove() }

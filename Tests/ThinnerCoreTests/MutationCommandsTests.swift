@@ -22,6 +22,50 @@ import Testing
         #expect(try report.json().contains("\\u001b[2J"), "JSON keeps the original string")
     }
 
+    /// Regression: bidirectional controls and Unicode line separators were
+    /// printed raw, so a crafted name could display as another path or start
+    /// a forged report line.
+    @Test func textEscapesBidiControlsAndLineSeparators() {
+        #expect(TerminalText.sanitize("a\u{202E}ppa.exe\u{2028}Fake: committed\u{2066}x\u{200F}")
+            == "a\\u{202E}ppa.exe\\u{2028}Fake: committed\\u{2066}x\\u{200F}")
+        #expect(TerminalText.sanitize("Café 日本語 👩‍💻.app") == "Café 日本語 👩‍💻.app", "ordinary names are untouched")
+    }
+
+    /// Regression: a scan summed the sizes recorded in every journal beside
+    /// the scanned apps with `+`, so a journal written by anyone able to
+    /// create a directory there crashed the scan with sizes that overflow.
+    @Test func journalSizesThatOverflowDoNotCrashAScan() throws {
+        let dir = FileManager.default.temporaryDirectory.appending(path: "overflow-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let app = dir.appending(path: "Fake.app")
+        let staging = dir.appending(path: ".thinner-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: app.appending(path: "Contents"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
+        let entry = { (name: String) in
+            Journal.Entry(relativePath: name, originalHash: "0", thinnedHash: nil, arm64SliceHash: "0",
+                          backupPath: "/nowhere", tempPath: nil, originalSize: .max, thinnedSize: 0, state: .committed)
+        }
+        var journal = Journal(operationID: "crafted", bundlePath: app.path, startedAt: "2026-01-01T00:00:00Z")
+        journal.state = .committed
+        journal.entries = [entry("a"), entry("b")]
+        try JSONEncoder().encode(journal).write(to: staging.appending(path: Journal.fileName))
+
+        let backups = PendingOperations.snapshot(root: dir, apps: [app]).backups
+        #expect(backups.sets.count == 1)
+        #expect(backups.retainedBytes == .max)
+        #expect(backups.removedBytes == .max)
+    }
+
+    /// Regression: hashing opened its path blocking, so a FIFO swapped in for
+    /// a file hung the run for ever while it held the app's lock.
+    @Test(.timeLimit(.minutes(1))) func hashingRefusesAFifoInsteadOfHanging() throws {
+        let fifo = FileManager.default.temporaryDirectory.appending(path: "fifo-\(UUID())").path
+        #expect(mkfifo(fifo, 0o600) == 0)
+        defer { unlink(fifo) }
+        #expect(throws: Problem.self) { try SHA256.hash(file: fifo) }
+        #expect(throws: Problem.self) { try SHA256.hash(file: fifo, offset: 0, count: 1) }
+    }
+
     /// Regression: recover on a directory inspected only the directory
     /// itself, so a journal beside a nested app was never reported.
     @Test func recoverReportFindsJournalsBesideNestedApps() throws {

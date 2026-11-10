@@ -42,6 +42,13 @@ struct Journal: Codable, Sendable {
         case committed
         case rolledBack
         case recoveryFailed
+        /// The app this operation changed is gone or was replaced (an update,
+        /// most likely) and holds none of its thinned files, so there is
+        /// nothing left to recover. Set only by an explicit recover, never by
+        /// a scan. The app is not touched and the backups are kept until the
+        /// user releases them; restore still uses them, by hash, if an app
+        /// with the recorded identity comes back.
+        case superseded
     }
 
     struct Entry: Codable, Sendable {
@@ -72,11 +79,21 @@ struct Journal: Codable, Sendable {
 ///   <staging>/journal.json        — the durable manifest
 ///   <staging>/backups/<relative>   — clonefile backups of originals
 ///   <staging>/temps/<relative>     — lipo output before swap
+///
+/// It is built as `.thinner-preparing-<UUID>` and renamed to
+/// `.thinner-<UUID>` only once its journal is durable, so every staging
+/// directory that discovery sees has a journal. A crash while preparing
+/// leaves a directory no operation treats as a backup set, and it holds no
+/// backups: they are made only after `activate`.
 struct StagingArea {
     let root: URL
     let backupsDir: URL
     let tempsDir: URL
     let journalPath: URL
+    /// Where the directory is built before `activate`.
+    let preparing: URL
+
+    static let preparingPrefix = ".thinner-preparing-"
 
     /// Creates a staging directory next to the bundle, on the same volume.
     /// The directory name includes the operation ID for uniqueness.
@@ -88,6 +105,7 @@ struct StagingArea {
         backupsDir = root.appending(path: "backups")
         tempsDir = root.appending(path: "temps")
         journalPath = root.appending(path: Journal.fileName)
+        preparing = parent.appending(path: Self.preparingPrefix + operationID)
 
         // Verify same volume, APFS, and free space.
         var bundleStat = statfs()
@@ -115,14 +133,65 @@ struct StagingArea {
             throw Problem("insufficient free space: need \(totalRequired) bytes (the thinned files plus a 2 GiB reserve), have \(freeBytes). Nothing was changed")
         }
 
-        do {
-            try FileManager.default.createDirectory(at: backupsDir, withIntermediateDirectories: true)
-            try FileManager.default.createDirectory(at: tempsDir, withIntermediateDirectories: true)
-        } catch {
-            throw Problem("cannot create staging directory: \(error.localizedDescription)")
+        guard mkdir(preparing.path, 0o755) == 0 else {
+            throw Problem("cannot create the staging directory beside the app: \(PermissionDiagnostic.describe(errno, path: preparing.path))")
+        }
+    }
+
+    /// Writes `journal` into the directory being prepared, then moves it into
+    /// place as the operation's staging directory and flushes the parent.
+    /// `boundary` marks the step for crash tests.
+    func activate(with journal: Journal, flushDirectory: (String) -> String? = syncDirectory,
+                  boundary: (String) -> Void = { _ in }) throws(Problem) {
+        try journal.persist(to: preparing.appending(path: Journal.fileName), flushDirectory: flushDirectory)
+        for dir in [backupsDir, tempsDir] {
+            let path = preparing.appending(path: dir.lastPathComponent).path
+            guard mkdir(path, 0o755) == 0 else {
+                throw Problem("cannot create \(path): \(errnoDescription())")
+            }
+        }
+        boundary("staging-prepared")
+        guard rename(preparing.path, root.path) == 0 else {
+            throw Problem("cannot move \(preparing.path) into place: \(errnoDescription())")
+        }
+        if let problem = flushDirectory(root.deletingLastPathComponent().path) {
+            throw Problem("cannot flush \(root.deletingLastPathComponent().path) to disk: \(problem)")
+        }
+    }
+
+    /// Removes what an interrupted preparation of an operation on the app
+    /// at `real` left behind, owned by `euid`. Only the known layout is
+    /// removed, file by file: a directory holding anything else stays.
+    static func removeAbandonedPreparations(of real: String, euid: uid_t) {
+        let parent = (real as NSString).deletingLastPathComponent
+        guard let tree = try? FileTree(URL(filePath: parent)), let entries = try? tree.entries([]) else { return }
+        for entry in entries where entry.kind == .directory && entry.name.hasPrefix(preparingPrefix)
+            && UUID(uuidString: String(entry.name.dropFirst(preparingPrefix.count))) != nil {
+            guard let info = try? tree.status([entry.name]), info.st_uid == euid else { continue }
+            guard let data = try? tree.read([entry.name, Journal.fileName], limit: 16 << 20) else {
+                // No journal: a crash between creating the directory and
+                // writing it. rmdir removes only an empty directory, and only
+                // an old one, so a sibling app's preparation that is still
+                // running is never touched.
+                if Date().timeIntervalSince1970 - TimeInterval(info.st_mtimespec.tv_sec) > abandonedAge {
+                    rmdir(parent + "/" + entry.name)
+                }
+                continue
+            }
+            guard let journal = try? JSONDecoder().decode(Journal.self, from: data),
+                  journal.entries.isEmpty,
+                  RestoreOperation.canonicalBundlePath(journal.bundlePath) == real else { continue }
+            let dir = parent + "/" + entry.name
+            for name in [Journal.fileName, ".\(Journal.fileName).tmp"] { unlink(dir + "/" + name) }
+            for name in ["backups", "temps"] { rmdir(dir + "/" + name) }
+            rmdir(dir)
         }
     }
     
+    /// How old a preparation directory without a journal must be before it
+    /// counts as abandoned.
+    static let abandonedAge: TimeInterval = 3600
+
     /// Free space kept beyond the thinned files, which are new data while
     /// their backups are retained.
     static let reserve: UInt64 = 2 << 30
@@ -130,14 +199,6 @@ struct StagingArea {
     /// Bytes available to an unprivileged writer on the volume.
     static func available(_ volume: statfs) -> UInt64 {
         UInt64(volume.f_bavail) * UInt64(volume.f_bsize)
-    }
-
-    /// Initializes from an existing staging root directory (used for recovery).
-    init(existingRoot: URL) {
-        self.root = existingRoot
-        self.backupsDir = root.appending(path: "backups")
-        self.tempsDir = root.appending(path: "temps")
-        self.journalPath = root.appending(path: Journal.fileName)
     }
 
     func backupPath(for relativePath: String) throws(Problem) -> URL {

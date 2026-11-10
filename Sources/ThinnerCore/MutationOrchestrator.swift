@@ -94,6 +94,8 @@ extension MutationCommands {
             .init(path: app.path, outcome: .committed, reason: "Verified and committed; backups retained.")
         case let .rolledBack(reason):
             .init(path: app.path, outcome: .rolledBack, reason: reason)
+        case let .superseded(reason):
+            .init(path: app.path, outcome: .superseded, reason: reason)
         case let .pending(reason):
             .init(path: app.path, outcome: .recoveryPending, reason: reason)
         case let .recoveryFailed(reason):
@@ -112,10 +114,11 @@ extension AppSkipReason {
     /// skip. The report's exit status must tell automation to investigate.
     var mutationOutcome: MutationReport.Outcome {
         switch self {
-        case .bundleMetadata, .rosettaInconclusive, .signatureInvalid:
+        case .bundleMetadata, .rosettaInconclusive, .signatureInvalid, .skipListUnreadable, .allowListUnreadable:
             .refused
         case .protectedLocation, .excluded, .containsExclusion, .scriptOnly,
-             .rosettaFlagged, .noNativeMainExecutable, .intelArchitecturePriority:
+             .rosettaFlagged, .noNativeMainExecutable, .intelArchitecturePriority, .intelOnlyCode, .skipListed,
+             .masApp, .embedsSystemExtension, .notOnAllowList:
             .skipped
         }
     }

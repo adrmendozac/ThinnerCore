@@ -65,7 +65,8 @@ public enum RestoreOperation {
     /// same release gate as `ThinOperation.apply` and `recover`. There is
     /// deliberately no runtime override.
     public static func restore(_ app: URL) -> RestoreResult {
-        RestoreResult(.refused(MutationCommands.releaseBlock))
+        guard MutationReleaseGate.isOpen else { return RestoreResult(.refused(MutationCommands.releaseBlock)) }
+        return restoreUnreleased(app)
     }
 
     struct Environment {
@@ -93,6 +94,27 @@ public enum RestoreOperation {
         }
     }
 
+    /// The real path an app at `app` would have, when nothing is there: its
+    /// parent resolved, refused in a protected location. Nil when the app
+    /// exists. Lets recover and release reach the backups of a deleted app.
+    static func missingAppPath(_ app: URL) throws(Problem) -> String? {
+        var info = stat()
+        if lstat(app.path, &info) == 0 { return nil }
+        guard errno == ENOENT else { throw Problem("cannot inspect \(app.path): \(errnoDescription())") }
+        let parent = app.deletingLastPathComponent()
+        guard let parentReal = realPath(parent.path) else {
+            throw Problem("cannot find \(parent.path): \(errnoDescription())")
+        }
+        let real = parentReal == "/" ? "/" + app.lastPathComponent : parentReal + "/" + app.lastPathComponent
+        if let why = ProtectedLocations.reason(forRealPath: parentReal) {
+            throw Problem("the app is in a protected location (\(why))")
+        }
+        if let why = PathSafety.untrustedAncestor(of: real) {
+            throw Problem("refusing to run as root here: \(why)")
+        }
+        return real
+    }
+
     /// The app's real path, refused in a protected location.
     static func resolve(_ app: URL) throws(Problem) -> String {
         guard let real = realPath(app.path) else {
@@ -100,6 +122,9 @@ public enum RestoreOperation {
         }
         if let why = ProtectedLocations.reason(forRealPath: real) {
             throw Problem("the app is in a protected location (\(why))")
+        }
+        if let why = PathSafety.untrustedAncestor(of: real) {
+            throw Problem("refusing to run as root here: \(why)")
         }
         return real
     }
@@ -254,7 +279,7 @@ public enum RestoreOperation {
             return result
         }
 
-        try requireUnused(bundle, env, &result)
+        if let reason = ThinOperation.idleRefusal(bundle, env) { throw Problem(reason) }
 
         // Record before any change.
         let runID = UUID().uuidString
@@ -287,8 +312,8 @@ public enum RestoreOperation {
             if stop == nil, FileIdentity.of(file.target) != file.identity || (try? SHA256.hash(file: file.target)) != file.thinnedHash {
                 stop = "\(file.relativePath) changed immediately before restore"
             }
-            if stop == nil, rename(file.temp!, file.target) != 0 {
-                stop = "cannot move the original of \(file.relativePath) into place: \(errnoDescription())"
+            if stop == nil, let problem = PathSafety.renameNoFollow(file.temp!, file.target) {
+                stop = "cannot move the original of \(file.relativePath) into place: \(problem)"
             }
             if let stop {
                 removeTemps(Array(plan[i...]))
@@ -368,14 +393,27 @@ public enum RestoreOperation {
             } catch {
                 throw Problem("cannot read the backup record \(journalPath); it may belong to this app: \(error.localizedDescription)")
             }
-            guard realPath(journal.bundlePath) == real || journal.bundlePath == real else { continue }
+            guard canonicalBundlePath(journal.bundlePath) == real else { continue }
             guard journal.schemaVersion == Journal.schemaVersion else {
                 throw Problem("the backup record \(journalPath) has schema version \(journal.schemaVersion), which this version cannot read")
             }
-            guard let stagingReal = realPath(staging.path) else { continue }
+            // Its journal names this app, so it cannot be set aside: a set
+            // left out here would look like "no unfinished operation".
+            guard let stagingReal = realPath(staging.path) else {
+                throw Problem("cannot resolve \(staging.path), so its backups cannot be trusted: \(errnoDescription())")
+            }
             sets.append(BackupSet(staging: staging, stagingReal: stagingReal, journal: journal, identity: journal.appIdentity))
         }
         return sets
+    }
+
+    /// A recorded app path with symlinks resolved, also for an app that no
+    /// longer exists: its parent resolved, plus its name.
+    static func canonicalBundlePath(_ path: String) -> String {
+        if let real = realPath(path) { return real }
+        let url = URL(filePath: path)
+        guard let parent = realPath(url.deletingLastPathComponent().path) else { return path }
+        return parent == "/" ? "/" + url.lastPathComponent : parent + "/" + url.lastPathComponent
     }
 
     /// Staging directories are named `.thinner-<operation UUID>`.
@@ -400,10 +438,6 @@ public enum RestoreOperation {
         guard try SHA256.hash(file: entry.backupPath) == entry.originalHash else {
             throw Problem("\(damaged): its contents differ from the original")
         }
-    }
-
-    private static func requireUnused(_ bundle: URL, _ env: Environment, _ result: inout RestoreResult) throws(Problem) {
-        if let reason = ThinOperation.idleRefusal(bundle, env) { throw Problem(reason) }
     }
 
     /// Path components of a recorded relative path, or nil if it could escape
@@ -506,8 +540,9 @@ public enum RestoreOperation {
     }
 
     /// After a retry verifies the app with every file original, finish any
-    /// record an earlier run left in progress or pending, so the history does
-    /// not show unfinished work. Failed and refused records stay as they were.
+    /// record an earlier run left in progress, pending, or failed, so the
+    /// history does not show unfinished work and release is no longer held
+    /// back by it. Refused records changed nothing and stay as they were.
     /// Runs only after the restore succeeded, so a record it cannot finish
     /// becomes a note, never a failure; each set is tried independently.
     private static func closeUnfinishedRecords(_ sets: [BackupSet]) -> [String] {
@@ -536,7 +571,7 @@ public enum RestoreOperation {
         } catch {
             throw Problem("cannot read the restore record in \(set.staging.path): \(error)")
         }
-        guard record.state == .inProgress || record.state == .pending else { return }
+        guard record.state == .inProgress || record.state == .pending || record.state == .recoveryFailed else { return }
         record.state = .restored
         record.reason = "finished by a later restore run that found every file original and the app verified"
         record.finishedAt = ISO8601DateFormatter().string(from: Date())
@@ -595,9 +630,22 @@ func durablyWrite(_ data: Data, to url: URL, flushDirectory: (String) -> String?
     let temp = url.deletingLastPathComponent().appending(path: ".\(url.lastPathComponent).tmp").path
     let fd = open(temp, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0o644)
     guard fd >= 0 else { throw Problem("cannot create \(temp): \(errnoDescription())") }
-    let written = data.withUnsafeBytes { raw in write(fd, raw.baseAddress, raw.count) }
-    guard written == data.count, fcntl(fd, F_FULLFSYNC) == 0 else {
-        let reason = written < 0 || written == data.count ? errnoDescription() : "short write"
+    // write(2) may stop early or be interrupted; neither is a failure.
+    var failure: String?
+    data.withUnsafeBytes { raw in
+        var offset = 0
+        while offset < raw.count {
+            let n = write(fd, raw.baseAddress! + offset, raw.count - offset)
+            if n > 0 {
+                offset += n
+            } else if n == 0 || errno != EINTR {
+                failure = n == 0 ? "short write" : errnoDescription()
+                return
+            }
+        }
+    }
+    if failure == nil, fcntl(fd, F_FULLFSYNC) != 0 { failure = errnoDescription() }
+    if let reason = failure {
         close(fd)
         unlink(temp)
         throw Problem("cannot write \(url.path): \(reason)")

@@ -44,7 +44,11 @@ enum MetadataCopier {
 
         // Owner and group.
         if fchown(destFD, source.uid, source.gid) != 0 {
-            return "cannot set owner: \(errnoDescription())"
+            let code = errno
+            if code == EPERM {
+                return "cannot give the new file its owner (uid \(source.uid), gid \(source.gid)): only root or that user can; run with sudo"
+            }
+            return "cannot set owner: \(String(cString: strerror(code)))"
         }
 
         // Mode bits.

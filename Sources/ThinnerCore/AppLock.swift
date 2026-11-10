@@ -24,6 +24,16 @@ final class AppLock {
         self.fd = fd
     }
 
+    /// Whether `path` still names the directory this lock holds: an updater
+    /// that replaces the whole bundle by rename leaves the lock on the old
+    /// one, and the path pointing at a different app.
+    func stillHolds(_ path: String) -> Bool {
+        var held = stat()
+        var named = stat()
+        guard fstat(fd, &held) == 0, lstat(path, &named) == 0 else { return false }
+        return held.st_dev == named.st_dev && held.st_ino == named.st_ino
+    }
+
     deinit {
         flock(fd, LOCK_UN)
         close(fd)

@@ -49,7 +49,7 @@ public struct ReleaseResult: Sendable {
 /// checks every set before deleting any, and refuses, deleting nothing, when:
 /// the app is in a protected location or missing; any backup record cannot be
 /// read; any thinning operation is unfinished or failed recovery; any restore
-/// is unfinished; or another user's run made a set.
+/// is unfinished or failed verification; or another user's run made a set.
 ///
 /// Each set is first renamed to `.thinner-released-<UUID>`, which no operation
 /// treats as a backup set, and that rename is flushed. Only then is it
@@ -63,25 +63,48 @@ public enum ReleaseOperation {
     /// Deleting backups is held back by the same release gate as `apply` and
     /// `restore`. There is deliberately no runtime override.
     public static func release(_ app: URL) -> ReleaseResult {
-        ReleaseResult(.refused(MutationCommands.releaseBlock))
+        guard MutationReleaseGate.isOpen else { return ReleaseResult(.refused(MutationCommands.releaseBlock)) }
+        return releaseUnreleased(app)
+    }
+
+    /// What `release` would delete, read-only and unlocked, like a scan: the
+    /// same checks, with `released` listing the sets that would go. Not
+    /// gated, since it changes nothing. A later release rechecks everything.
+    public static func preview(_ app: URL) -> ReleaseResult {
+        preview(app, environment: .init())
+    }
+
+    static func preview(_ app: URL, environment env: RestoreOperation.Environment) -> ReleaseResult {
+        do throws(Problem) {
+            var real = try RestoreOperation.missingAppPath(app)
+            if real == nil { real = try RestoreOperation.resolve(app) }
+            return try release(real!, env, delete: false)
+        } catch {
+            return ReleaseResult(.refused("Nothing would be deleted: \(error.description)"))
+        }
     }
 
     /// The release. Internal so tests can run it; library clients reach only
     /// the gated `release`.
     static func releaseUnreleased(_ app: URL, environment env: RestoreOperation.Environment = .init()) -> ReleaseResult {
         do {
+            // A deleted app's backups can still be released; with no app
+            // there is nothing to lock, and each set's lock is still taken.
+            if let missing = try RestoreOperation.missingAppPath(app) {
+                return try release(missing, env, delete: true)
+            }
             let real = try RestoreOperation.resolve(app)
             let lock = try AppLock(real)
             defer { withExtendedLifetime(lock) {} }
-            return try release(real, env)
+            return try release(real, env, delete: true)
         } catch {
             return ReleaseResult(.refused("Nothing was deleted: \(error.description)"))
         }
     }
 
-    private static func release(_ real: String, _ env: RestoreOperation.Environment) throws(Problem) -> ReleaseResult {
+    private static func release(_ real: String, _ env: RestoreOperation.Environment, delete: Bool) throws(Problem) -> ReleaseResult {
         let parent = (real as NSString).deletingLastPathComponent
-        let earlier = finishEarlierReleases(of: real, in: parent, env)
+        let earlier = delete ? finishEarlierReleases(of: real, in: parent, env) : []
         func reporting(_ outcome: ReleaseResult.Outcome) -> ReleaseResult {
             var result = ReleaseResult(outcome)
             result.notes = earlier
@@ -93,22 +116,52 @@ public enum ReleaseOperation {
         }
 
         let quoted = StagingOwner.shellQuoted(real)
-        let unfinished = sets.filter { $0.journal.state == .inProgress || $0.journal.state == .recoveryFailed }
-        guard unfinished.isEmpty else {
-            return reporting(.pending("an unfinished operation still needs its backups (\(unfinished.map(\.staging.path).joined(separator: ", "))). Run thinnercore recover \(quoted) first. Nothing was deleted"))
+        // Why these sets must not be deleted now, or nil.
+        func blocked(_ sets: [RestoreOperation.BackupSet]) throws(Problem) -> ReleaseResult? {
+            let unfinished = sets.filter { $0.journal.state == .inProgress || $0.journal.state == .recoveryFailed }
+            guard unfinished.isEmpty else {
+                return reporting(.pending("an unfinished operation still needs its backups (\(unfinished.map(\.staging.path).joined(separator: ", "))). Run thinnercore recover \(quoted) first. Nothing was deleted"))
+            }
+            for set in sets {
+                switch try restoreState(set) {
+                case .inProgress?, .pending?:
+                    return reporting(.pending("a restore from \(set.staging.path) did not finish. Run thinnercore restore \(quoted) first. Nothing was deleted"))
+                case .recoveryFailed?:
+                    // The app may be part restored and not verify; these backups
+                    // are its only way back.
+                    return reporting(.pending("a restore from \(set.staging.path) failed verification, so the app may still need these backups. Run thinnercore restore \(quoted) until it succeeds first. Nothing was deleted"))
+                case .restored?, .refused?, nil:
+                    break
+                }
+                if let refusal = StagingOwner.refusal(set.staging, euid: env.euid(), rerun: "release", app: real) {
+                    throw Problem(refusal)
+                }
+            }
+            return nil
         }
-        for set in sets {
-            if let state = try restoreState(set), state == .inProgress || state == .pending {
-                return reporting(.pending("a restore from \(set.staging.path) did not finish. Run thinnercore restore \(quoted) first. Nothing was deleted"))
-            }
-            if let refusal = StagingOwner.refusal(set.staging, euid: env.euid(), rerun: "release", app: real) {
-                throw Problem(refusal)
-            }
+        if let refusal = try blocked(sets) { return refusal }
+
+        guard delete else {
+            var result = reporting(.released)
+            result.released = sets.map(\.staging.path)
+            result.releasedBytes = sets.flatMap(\.journal.entries).map(\.originalSize).saturatingSum()
+            result.notes.append(warning)
+            return result
         }
 
         var locks: [StagingLock] = []
         for set in sets { locks.append(try StagingLock(set.staging)) }
         defer { withExtendedLifetime(locks) {} }
+
+        // Checked again now that no other operation can use these backups:
+        // without the app's lock (a missing app has none to take), the app
+        // can come back and a restore can run between the first check and
+        // the locks. Read every record afresh, and stop if the sets changed.
+        let locked = try RestoreOperation.findBackupSets(for: real)
+        guard locked.map(\.staging.path) == sets.map(\.staging.path) else {
+            return reporting(.pending("the app's backup sets changed during the release. Nothing was deleted; run release again"))
+        }
+        if let refusal = try blocked(locked) { return refusal }
 
         let current = try? AppIdentity.of(URL(filePath: real))
         var result = reporting(.released)
@@ -129,7 +182,7 @@ public enum ReleaseOperation {
                 break
             }
             result.released.append(set.staging.path)
-            result.releasedBytes += set.journal.entries.map(\.originalSize).reduce(0, +)
+            result.releasedBytes = ([result.releasedBytes] + set.journal.entries.map(\.originalSize)).saturatingSum()
             if let current, set.identity != current {
                 result.notes.append("\(set.staging.path) held backups from another version of the app (\(set.identity.map(\.description) ?? "unrecorded"))")
             }
@@ -172,7 +225,7 @@ public enum ReleaseOperation {
                 notes.append("left \(path) alone: its record cannot be read")
                 continue
             }
-            guard realPath(journal.bundlePath) == real || journal.bundlePath == real else { continue }
+            guard RestoreOperation.canonicalBundlePath(journal.bundlePath) == real else { continue }
             if let refusal = StagingOwner.refusal(URL(filePath: path), euid: env.euid(), rerun: "release", app: real) {
                 notes.append(refusal)
                 continue

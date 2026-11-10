@@ -75,6 +75,55 @@ import Testing
         #expect(FileManager.default.fileExists(atPath: copy.journalURL.path))
     }
 
+    /// Regression: a restore that failed verification may leave the app
+    /// part restored, and release deleted the backups it still needs. A
+    /// later restore that verifies the app lifts the hold.
+    @Test func keepsBackupsAfterAFailedRestoreUntilARestoreSucceeds() throws {
+        let copy = try ThinnedCopy()
+        defer { copy.remove() }
+        var failing = idleEnvironment
+        failing.verify = { _ in "injected verification failure" }
+        #expect(RestoreOperation.restoreUnreleased(copy.app, environment: failing).outcome.exitCode == 4)
+        #expect(try copy.restoreRecord()["state"] as? String == "recoveryFailed")
+
+        let held = ReleaseOperation.releaseUnreleased(copy.app, environment: idleEnvironment).outcome
+        guard case let .pending(reason) = held else { Issue.record("released after a failed restore: \(held)"); return }
+        #expect(reason.contains("failed verification"))
+        #expect(copy.entries.allSatisfy { FileManager.default.fileExists(atPath: $0.backupPath) })
+
+        // Every file is already original, so this run only verifies the app
+        // and closes the failed record.
+        #expect(RestoreOperation.restoreUnreleased(copy.app, environment: idleEnvironment).outcome.exitCode == 0)
+        #expect(try copy.restoreRecord()["state"] as? String == "restored")
+        #expect(ReleaseOperation.releaseUnreleased(copy.app, environment: idleEnvironment).outcome == .released)
+    }
+
+    /// Regression (CodeRabbit review, 2026-11-10): release checked the
+    /// restore records before locking the backup sets, so a restore that
+    /// failed in between went unnoticed and its backups were deleted. The
+    /// failure is written during the first check, through the euid seam,
+    /// which runs after each set's record has been read.
+    @Test func rechecksTheRecordsAfterLockingTheSets() throws {
+        let copy = try ThinnedCopy()
+        defer { copy.remove() }
+        var env = idleEnvironment
+        var written = false
+        env.euid = {
+            if !written {
+                written = true
+                var record = RestoreOperation.RestoreRecord(operationID: "x", runID: "y")
+                record.state = .recoveryFailed
+                try? JSONEncoder().encode(record).write(to: copy.staging.appending(path: RestoreOperation.RestoreRecord.fileName))
+            }
+            return geteuid()
+        }
+        let outcome = ReleaseOperation.releaseUnreleased(copy.app, environment: env).outcome
+        guard case let .pending(reason) = outcome else { Issue.record("released after a restore failed: \(outcome)"); return }
+        #expect(reason.contains("failed verification"))
+        #expect(written)
+        #expect(copy.entries.allSatisfy { FileManager.default.fileExists(atPath: $0.backupPath) })
+    }
+
     @Test func releasesAfterAFinishedRestore() throws {
         let copy = try ThinnedCopy()
         defer { copy.remove() }

@@ -13,7 +13,7 @@ public struct PendingOperations: Codable, Equatable, Sendable {
     public var searchedDirectories: [String] = []
 
     static func isStagingName(_ name: String) -> Bool {
-        name.hasPrefix(".thinner-") && UUID(uuidString: String(name.dropFirst(9))) != nil
+        RestoreOperation.isStagingName(name)
     }
 
     /// Only journals for the requested app, or for apps under the requested
@@ -94,13 +94,15 @@ public struct RetainedBackups: Codable, Equatable, Sendable {
         /// The logical size of the backups kept.
         public let retainedBytes: UInt64
         /// Logical bytes the operation removed from the app and that are
-        /// still removed: zero once rolled back or restored.
+        /// still removed: zero once rolled back or restored. After a restore
+        /// attempt, only files matching their thinned hash count; unreadable
+        /// or externally changed files contribute zero to this snapshot.
         public let removedBytes: UInt64
     }
 
     public var sets: [BackupSet] = []
-    public var retainedBytes: UInt64 { sets.map(\.retainedBytes).reduce(0, +) }
-    public var removedBytes: UInt64 { sets.map(\.removedBytes).reduce(0, +) }
+    public var retainedBytes: UInt64 { sets.map(\.retainedBytes).saturatingSum() }
+    public var removedBytes: UInt64 { sets.map(\.removedBytes).saturatingSum() }
 
     enum CodingKeys: String, CodingKey { case sets, retainedBytes, removedBytes }
 
@@ -119,13 +121,23 @@ public struct RetainedBackups: Codable, Equatable, Sendable {
 
     mutating func add(_ journal: Journal, staging: String, restoreState: String?) {
         let stillRemoved = journal.state == .committed && restoreState != "restored"
+        let appTree = stillRemoved && restoreState != nil ? try? FileTree(URL(filePath: journal.bundlePath)) : nil
         sets.append(BackupSet(
             bundlePath: journal.bundlePath, stagingPath: staging, state: journal.state.rawValue,
             restoreState: restoreState,
-            retainedBytes: journal.entries.map(\.originalSize).reduce(0, +),
+            retainedBytes: journal.entries.map(\.originalSize).saturatingSum(),
             removedBytes: stillRemoved
-                ? journal.entries.filter { $0.state == .committed }
-                    .map { $0.originalSize - min($0.thinnedSize ?? $0.originalSize, $0.originalSize) }.reduce(0, +)
+                ? journal.entries.filter { entry in
+                    guard entry.state == .committed else { return false }
+                    guard restoreState != nil else { return true }
+                    // A restore can stop after a swap but before recording it.
+                    // Once a restore was attempted, count only files that
+                    // still match the recorded thinned contents. This also
+                    // handles unreadable records and failed verification.
+                    guard let expected = entry.thinnedHash else { return false }
+                    return (try? appTree?.hash(entry.relativePath.components(separatedBy: "/"))) == expected
+                }
+                    .map { $0.originalSize - min($0.thinnedSize ?? $0.originalSize, $0.originalSize) }.saturatingSum()
                 : 0))
     }
 
@@ -141,5 +153,17 @@ public struct RetainedBackups: Codable, Equatable, Sendable {
             return "unreadable"
         }
         return record.state.rawValue
+    }
+}
+
+extension Sequence<UInt64> {
+    /// The sum, capped at `UInt64.max`. Sizes recorded in a journal are
+    /// untrusted input: anyone who can create a directory beside an app can
+    /// write one, and `+` would trap on sizes chosen to overflow.
+    func saturatingSum() -> UInt64 {
+        reduce(0) { total, next in
+            let (sum, overflow) = total.addingReportingOverflow(next)
+            return overflow ? .max : sum
+        }
     }
 }
