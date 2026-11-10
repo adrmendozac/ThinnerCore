@@ -126,6 +126,12 @@ final class FileTree {
         }
     }
 
+    func hash(_ path: [String]) throws(Problem) -> String {
+        try withRegularFile(path) { file, _ throws(Problem) in
+            try SHA256.hash(descriptor: file)
+        }
+    }
+
     private func withRegularFile<T>(_ path: [String], _ body: (Int32, Int) throws(Problem) -> T) throws(Problem) -> T {
         let joined = try Self.join(path)
         let file = openat(fd, joined, O_RDONLY | O_NOFOLLOW_ANY | O_NONBLOCK | O_CLOEXEC)
@@ -197,4 +203,36 @@ final class FileTree {
 
 func errnoDescription() -> String {
     String(cString: strerror(errno))
+}
+
+/// The whole regular file at `path`, or nil when nothing is there. For
+/// settings files outside any bundle, read on behalf of a user whose files a
+/// root run must not trust: a symlink at the last component is refused, and
+/// so is anything but a regular file, so a FIFO or device cannot hang or
+/// flood the run. Larger than `limit` bytes is an error.
+func readSettingsFile(_ path: String, limit: Int) throws(Problem) -> Data? {
+    let fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+    guard fd >= 0 else {
+        if errno == ENOENT { return nil }
+        throw Problem(errno == ELOOP ? "\(path) is a symbolic link" : "\(path): \(errnoDescription())")
+    }
+    defer { close(fd) }
+    var info = stat()
+    guard fstat(fd, &info) == 0 else { throw Problem("\(path): \(errnoDescription())") }
+    guard info.st_mode & S_IFMT == S_IFREG else { throw Problem("\(path) is not a regular file") }
+    guard info.st_size <= limit else { throw Problem("\(path) is larger than \(limit) bytes") }
+    var data = Data(count: Int(info.st_size))
+    var filled = 0
+    while filled < data.count {
+        let n = data.withUnsafeMutableBytes { raw in read(fd, raw.baseAddress! + filled, raw.count - filled) }
+        if n > 0 {
+            filled += n
+        } else if n == 0 {
+            break
+        } else if errno != EINTR {
+            throw Problem("\(path): \(errnoDescription())")
+        }
+    }
+    guard filled == data.count else { throw Problem("\(path) changed while being read") }
+    return data
 }

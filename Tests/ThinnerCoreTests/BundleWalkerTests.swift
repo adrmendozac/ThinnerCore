@@ -118,6 +118,26 @@ import ThinnerCore
         #expect(result.files.allSatisfy { $0.decision == .skip(.hardLinked) })
     }
 
+    /// Regression: a file with flags the thinned copy cannot keep (here
+    /// `uchg`; on real apps, `compressed`) failed the metadata read-back
+    /// after the backup and lipo, and rolled back the whole app. It is now
+    /// skipped before anything is written. Reproducible flags still thin.
+    @Test func unreproducibleFileFlagsAreSkipped() throws {
+        defer {
+            _ = chflags(root.appending(path: "immutable").path, 0)
+            cleanUp()
+        }
+        try copyFixture("macho/fat-arm64-x86_64", to: "immutable")
+        try copyFixture("macho/fat-arm64-x86_64", to: "hidden")
+        try #require(chflags(root.appending(path: "immutable").path, UInt32(UF_IMMUTABLE)) == 0)
+        try #require(chflags(root.appending(path: "hidden").path, UInt32(UF_HIDDEN | UF_NODUMP)) == 0)
+
+        let result = BundleWalker.walk(root)
+        let decisions = Dictionary(uniqueKeysWithValues: result.files.map { ($0.relativePath, $0.decision) })
+        #expect(decisions["immutable"] == .skip(.fileFlags("uchg")))
+        #expect(decisions["hidden"]?.isEligible == true)
+    }
+
     @Test func fifosAreNotOpened() throws {
         defer { cleanUp() }
         try #require(mkfifo(root.appending(path: "pipe").path, 0o600) == 0)

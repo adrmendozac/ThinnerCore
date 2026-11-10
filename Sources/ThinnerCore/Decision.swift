@@ -1,3 +1,5 @@
+import Darwin
+
 /// What the classifier decided for one file.
 public enum Decision: Equatable, Sendable {
     /// Statically eligible: removing these slices leaves an ordinary arm64
@@ -23,6 +25,12 @@ public enum SkipReason: Hashable, Sendable, CustomStringConvertible {
     /// The file has other hard links. Replacing it by rename would change only
     /// this name and leave the others pointing at the universal original.
     case hardLinked
+    /// The file carries BSD flags a thinned copy could not keep: `compressed`
+    /// (transparent compression, which the thinned file would lose, so it
+    /// could take more disk space than the original), system flags that need
+    /// privilege or cannot be set at all, or `uchg`/`uappnd`, which block the
+    /// swap. Named as `ls -lO` names them.
+    case fileFlags(String)
     /// An enclosing bundle seals the file's bytes (`hash`/`hash2`), so any
     /// change breaks that bundle's signature. `by` is the bundle's path
     /// relative to the scanned bundle; empty for the scanned bundle itself.
@@ -43,6 +51,7 @@ public enum SkipReason: Hashable, Sendable, CustomStringConvertible {
         case .noIntel: "noIntel"
         case .noSavings: "noSavings"
         case .hardLinked: "hardLinked"
+        case .fileFlags: "fileFlags"
         case .sealedAsData: "sealedAsData"
         case .unsealed: "unsealed"
         case .signatureMetadata: "signatureMetadata"
@@ -57,11 +66,30 @@ public enum SkipReason: Hashable, Sendable, CustomStringConvertible {
         case .noIntel: "no Intel slice to remove"
         case .noSavings: "removing the Intel slices would not shrink the file"
         case .hardLinked: "has other hard links"
+        case let .fileFlags(flags): "has file flags a thinned copy could not keep (\(flags))"
         case let .sealedAsData(by):
             "sealed as data by \(by.isEmpty ? "the bundle" : by); thinning would break its signature"
         case let .unsealed(detail): "not sealed as code: \(detail)"
         case let .signatureMetadata(detail): "signature metadata missing or unreadable: \(detail)"
         }
+    }
+}
+
+/// BSD file flags the write path reproduces exactly on the thinned file. A
+/// file's owner can set each of these, and none blocks the swap (measured
+/// 2026-10-05). Any other flag skips the file before anything is written.
+enum FileFlags {
+    static let reproducible = UInt32(UF_NODUMP | UF_OPAQUE | UF_TRACKED | UF_HIDDEN)
+
+    /// The flags in `flags` that cannot be reproduced, named as `ls -lO`
+    /// names them, or nil when there are none.
+    static func unreproducible(_ flags: UInt32) -> String? {
+        let rest = flags & ~reproducible
+        guard rest != 0 else { return nil }
+        guard let names = fflagstostr(UInt(rest)) else { return "0x" + String(rest, radix: 16) }
+        defer { free(names) }
+        let text = String(cString: names)
+        return text.isEmpty ? "0x" + String(rest, radix: 16) : text
     }
 }
 

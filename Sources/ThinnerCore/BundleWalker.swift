@@ -25,6 +25,11 @@ public struct WalkResult: Equatable, Sendable {
     public var files: [WalkedFile] = []
     /// Sorted by path.
     public var issues: [WalkIssue] = []
+    /// Executables, libraries, and plugins with an Intel slice and no
+    /// ordinary arm64 slice, thin or universal, sorted by path. They can run
+    /// only under Rosetta, where they may load universal code from the same
+    /// bundle that thinning would leave without its Intel slice.
+    public var intelOnlyCode: [String] = []
 }
 
 /// Walks a directory tree read-only and classifies every universal file by
@@ -56,6 +61,7 @@ public enum BundleWalker {
         visit(directory: fd, relativePath: "", into: &result)
         result.files.sort { $0.relativePath < $1.relativePath }
         result.issues.sort { $0.relativePath < $1.relativePath }
+        result.intelOnlyCode.sort()
         return result
     }
 
@@ -136,11 +142,15 @@ public enum BundleWalker {
         var architectures: [Arch] = []
         switch parsed {
         case .notFat:
+            if isIntelOnlyThinCode(header) { result.intelOnlyCode.append(relativePath) }
             return
         case .malformed:
             break
         case let .fat(binary):
             architectures = binary.slices.map(\.arch)
+            if !architectures.contains(.arm64), architectures.contains(where: \.isIntel) {
+                result.intelOnlyCode.append(relativePath)
+            }
             for slice in binary.slices {
                 let bytes: [UInt8]
                 do {
@@ -160,11 +170,33 @@ public enum BundleWalker {
             if case .eligible = decision, info.st_nlink > 1 {
                 decision = .skip(.hardLinked)
             }
+            // Checked here, before anything is written, rather than found
+            // by the metadata read-back after a backup and a lipo run.
+            if case .eligible = decision, let flags = FileFlags.unreproducible(UInt32(info.st_flags)) {
+                decision = .skip(.fileFlags(flags))
+            }
         }
 
         result.files.append(WalkedFile(
             relativePath: relativePath, size: size, architectures: architectures, decision: decision
         ))
+    }
+
+    /// A thin Mach-O executable, library, or plugin for an Intel CPU.
+    static func isIntelOnlyThinCode(_ header: [UInt8]) -> Bool {
+        guard header.count >= 16 else { return false }
+        let cpuType, fileType: UInt32
+        switch readBE32(header, 0) {
+        case 0xCFFA_EDFE, 0xCEFA_EDFE: // MH_MAGIC_64 / MH_MAGIC, little-endian on disk
+            (cpuType, fileType) = (readLE32(header, 4), readLE32(header, 12))
+        case 0xFEED_FACF, 0xFEED_FACE:
+            (cpuType, fileType) = (readBE32(header, 4), readBE32(header, 12))
+        default:
+            return false
+        }
+        let intel: Set<UInt32> = [0x0100_0007, 0x7] // x86_64, i386
+        let code: Set<UInt32> = [0x2, 0x6, 0x8] // MH_EXECUTE, MH_DYLIB, MH_BUNDLE
+        return intel.contains(cpuType) && code.contains(fileType)
     }
 
     private struct ReadError: Error, CustomStringConvertible {
@@ -188,9 +220,5 @@ public enum BundleWalker {
             }
         }
         return Array(buffer.prefix(filled))
-    }
-
-    private static func errnoDescription() -> String {
-        String(cString: strerror(errno))
     }
 }

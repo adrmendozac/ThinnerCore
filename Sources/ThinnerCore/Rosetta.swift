@@ -39,6 +39,11 @@ struct RosettaFlags {
 
     static let legacyKey = "LSArchitecturesForX86_64"
 
+    /// Real LaunchServices preferences run to a few hundred kilobytes.
+    static let preferencesLimit = 64 << 20
+
+    private struct Absent: Error {}
+
     /// `Architectures(<host arch>)`, or the legacy name.
     static func isFlagKey(_ key: String) -> Bool {
         key == legacyKey || (key.hasPrefix("Architectures(") && key.hasSuffix(")"))
@@ -53,23 +58,52 @@ struct RosettaFlags {
     /// only the runtime itself counts.
     static let runtime = "/Library/Apple/usr/libexec/oah/libRosettaRuntime"
 
-    static func defaultPreferences() -> URL {
-        let home = getpwuid(geteuid()).flatMap { String(cString: $0.pointee.pw_dir) } ?? NSHomeDirectory()
+    /// The user whose "Open using Rosetta" choices a run without
+    /// `--rosetta-preferences` honors: the effective user, or under `sudo`
+    /// the user who ran it, or failing that the console user. Root's own
+    /// preferences never hold anyone's choice, so a root run with neither
+    /// user fails closed instead of reading them.
+    static func defaultPreferencesUser(euid: uid_t = geteuid(),
+                                       environment: [String: String] = ProcessInfo.processInfo.environment,
+                                       consoleUID: () -> uid_t? = Self.consoleUID) -> Result<uid_t, Problem> {
+        guard euid == 0 else { return .success(euid) }
+        if let sudo = environment["SUDO_UID"].flatMap(uid_t.init), sudo != 0 { return .success(sudo) }
+        if let console = consoleUID(), console != 0 { return .success(console) }
+        return .failure(Problem("running as root with no invoking user (SUDO_UID) and no console user, so it is unknown whose \"Open using Rosetta\" settings apply; pass --rosetta-preferences"))
+    }
+
+    static func preferences(of uid: uid_t) -> URL {
+        let home = getpwuid(uid).flatMap { String(cString: $0.pointee.pw_dir) } ?? NSHomeDirectory()
         return URL(filePath: home).appending(path: "Library/Preferences/com.apple.LaunchServices/com.apple.LaunchServices.plist")
     }
 
-    init(preferences url: URL, runtime: String = Self.runtime) {
+    /// The owner of `/dev/console`: the user logged in at the screen, or root
+    /// at the login window.
+    static func consoleUID() -> uid_t? {
+        var info = stat()
+        return stat("/dev/console", &info) == 0 ? info.st_uid : nil
+    }
+
+    /// `owner` names the user the report credits with the preferences; by
+    /// default the file's owner, or the effective user when it is absent.
+    /// `problem` fails closed: every app is skipped as inconclusive.
+    init(preferences url: URL, owner: uid_t? = nil, problem: String? = nil, runtime: String = Self.runtime) {
         let installed = FileManager.default.fileExists(atPath: runtime) || Self.archRuns()
 
         var info = stat()
-        let owner = stat(url.path, &info) == 0 ? info.st_uid : geteuid()
-        let user = getpwuid(owner).map { String(cString: $0.pointee.pw_name) } ?? "uid \(owner)"
+        let ownerID = owner ?? (stat(url.path, &info) == 0 ? info.st_uid : geteuid())
+        let user = getpwuid(ownerID).map { String(cString: $0.pointee.pw_name) } ?? "uid \(ownerID)"
 
         var entries: [String: Flag]? = nil
         var unreadable: String? = nil
         let preferences: RosettaStatus.Preferences
         do {
-            let data = try Data(contentsOf: url)
+            if let problem { throw Problem(problem) }
+            // Bounded and never through a symlink or FIFO: a root run reads
+            // this on behalf of a user it must not trust.
+            guard let data = try readSettingsFile(url.path, limit: Self.preferencesLimit) else {
+                throw Absent()
+            }
             let plist = try? PropertyListSerialization.propertyList(from: data, format: nil)
             guard let root = plist as? [String: Any] else {
                 throw Problem("not a property list dictionary")
@@ -87,7 +121,7 @@ struct RosettaFlags {
             }
             entries = found
             preferences = .read(flagged: entries?.values.count { $0 == .flagged } ?? 0)
-        } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
+        } catch is Absent {
             entries = [:]
             preferences = .absent
         } catch {
