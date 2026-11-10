@@ -56,6 +56,62 @@ private let currentUser = String(cString: getpwuid(getuid())!.pointee.pw_name)
 
     // MARK: - Exclusions
 
+    @Test func skipListBundleIdentifierSkipsTheAppWherever() throws {
+        defer { cleanUp() }
+        try copyApp(to: "A/Signed.app")
+        try copyApp(to: "B/Signed.app")
+        try copyApp(to: "Other.app", from: "bundles/Electron.app")
+        let id = try #require(scan().apps.first { $0.relativePath == "A/Signed.app" }?.bundleIdentifier)
+
+        var options = ScanOptions(launchServicesPreferences: prefs)
+        options.skipList = SkipList(bundleIdentifiers: [id])
+        let result = AppScanner.scan(root, options: options)
+        #expect(try app(result, "A/Signed.app").skip == .skipListed(id))
+        #expect(try app(result, "B/Signed.app").skip == .skipListed(id))
+        #expect(try app(result, "Other.app").skip == nil)
+    }
+
+    @Test func skipListPathActsLikeAnExclusion() throws {
+        defer { cleanUp() }
+        let listed = try copyApp(to: "Listed.app")
+        try copyApp(to: "Keep.app")
+        var options = ScanOptions(launchServicesPreferences: prefs)
+        options.skipList = SkipList(paths: [listed.path])
+        let result = AppScanner.scan(root, options: options)
+        #expect(try app(result, "Listed.app").skip == .excluded(listed.path))
+        #expect(try app(result, "Keep.app").skip == nil)
+    }
+
+    @Test func unreadableSkipListRefusesEveryApp() throws {
+        defer { cleanUp() }
+        try copyApp(to: "One.app")
+        var options = ScanOptions(launchServicesPreferences: prefs)
+        options.loadSkipList(dir) // a directory, not a readable list
+        let result = AppScanner.scan(root, options: options)
+        let skip = try #require(try app(result, "One.app").skip)
+        #expect(skip.code == "skipListUnreadable")
+        // Missing is not unreadable: no file means nothing listed.
+        var missing = ScanOptions(launchServicesPreferences: prefs)
+        missing.loadSkipList(dir.appending(path: "absent.txt"))
+        #expect(missing.skipListProblem == nil && missing.skipList.isEmpty)
+    }
+
+    @Test func symlinkedSkipListIsRefusedAndNeverRewritten() throws {
+        defer { cleanUp() }
+        try copyApp(to: "One.app")
+        let target = dir.appending(path: "real-list.txt")
+        try Data("com.example.kept\n".utf8).write(to: target)
+        let link = dir.appending(path: "skip-list.txt")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+
+        var options = ScanOptions(launchServicesPreferences: prefs)
+        options.loadSkipList(link)
+        #expect(try app(AppScanner.scan(root, options: options), "One.app").skip?.code == "skipListUnreadable")
+        #expect(throws: Problem.self) { _ = try SkipListFile.add("com.example.new", at: link) }
+        #expect(throws: Problem.self) { _ = try SkipListFile.remove("com.example.kept", at: link) }
+        #expect(try String(contentsOf: target, encoding: .utf8) == "com.example.kept\n")
+    }
+
     @Test func excludedAppIsListedButNotRead() throws {
         defer { cleanUp() }
         try copyApp(to: "Keep.app")
@@ -190,7 +246,7 @@ private let currentUser = String(cString: getpwuid(getuid())!.pointee.pw_name)
     func openUsingRosettaFlagSkipsThatAppOnly(key: String) throws {
         defer { cleanUp() }
         try copyApp(to: "Flagged.app")
-        try copyApp(to: "Other.app", from: "bundles/Nested.app")
+        try copyApp(to: "Other.app", from: "bundles/Electron.app")
         try writePrefs([key: [
             "dev.thinner.fixture.signed": [Data([1, 2, 3]), "x86_64"],
         ]])
@@ -240,7 +296,7 @@ private let currentUser = String(cString: getpwuid(getuid())!.pointee.pw_name)
     @Test func macOS27RosettaFlagIsRead() throws {
         defer { cleanUp() }
         try copyApp(to: "Flagged.app")
-        try copyApp(to: "Other.app", from: "bundles/Nested.app")
+        try copyApp(to: "Other.app", from: "bundles/Electron.app")
         let bookmark = Data("book".utf8) + Data(count: 1036)
         try writePrefs([
             "Architectures(arm64)": ["dev.thinner.fixture.signed": [bookmark, "x86_64"]],
@@ -344,6 +400,32 @@ private let currentUser = String(cString: getpwuid(getuid())!.pointee.pw_name)
             #expect(scanned.skip == .noNativeMainExecutable(["x86_64"]), "\(name)")
             #expect(scanned.files.contains { if case .eligible = $0.decision { true } else { false } }, "\(name): other files would otherwise be thinned")
         }
+    }
+
+    /// Mixed-architecture policy (2026-10-05): an Intel-only helper runs
+    /// under Rosetta and may load the app's universal frameworks, which
+    /// thinning would leave without an Intel slice. The whole app is skipped.
+    /// Intel-only Node modules alone do not skip it.
+    @Test func intelOnlyHelperSkipsTheWholeApp() throws {
+        defer { cleanUp() }
+        let app = try copyApp(to: "App.app")
+        let helper = app.appending(path: "Contents/MacOS/legacy-tool")
+        try FileManager.default.copyItem(at: try Fixtures.url("macho/thin-x86_64"), to: helper)
+        try #require(try Shell.run("/usr/bin/codesign", "--sign", "-", helper.path).status == 0)
+        try resign(app)
+
+        let scanned = try self.app(scan(), "App.app")
+        #expect(scanned.skip == .intelOnlyCode(["Contents/MacOS/legacy-tool"]))
+        #expect(scanned.eligibleCount == 0)
+        #expect(scanned.skip?.description.contains("Contents/MacOS/legacy-tool") == true)
+    }
+
+    @Test func intelOnlyNodeModuleIsListedButDoesNotSkip() throws {
+        defer { cleanUp() }
+        let scanned = try app(scan(try copyApp(to: "Electron.app", from: "bundles/Electron.app")), "Electron.app")
+        #expect(scanned.skip == nil)
+        #expect(scanned.intelOnlyCode.count == 1)
+        #expect(scanned.intelOnlyCode.allSatisfy { $0.hasSuffix(".node") })
     }
 
     @Test func malformedArchitecturePriorityIsBundleMetadata() throws {

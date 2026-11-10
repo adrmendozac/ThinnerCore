@@ -7,12 +7,78 @@ public struct ScanOptions: Sendable {
     /// firmlinks, and letter case do not matter.
     public var excludes: [URL]
     /// The LaunchServices preferences holding "Open using Rosetta" flags.
-    /// Defaults to the effective user's.
+    /// Defaults to the effective user's, or under `sudo` to the invoking
+    /// user's: root's own preferences never hold the user's choices.
     public var launchServicesPreferences: URL
+    /// Whose preferences the default names, for the report.
+    var preferencesOwner: uid_t?
+    /// Why no default could be chosen; every app is then inconclusive.
+    var preferencesProblem: String?
+    /// The user whose home `~/` list entries and the plugin folders refer
+    /// to: the effective user, or under `sudo` the invoking one. Kept apart
+    /// from `preferencesOwner`, which is nil when a preferences file is
+    /// named explicitly; falling back to the effective user there would mean
+    /// root's home under `sudo`, and `~/` skip-list entries would exclude
+    /// nothing.
+    var homeOwner: uid_t?
+    /// The user's skip list (see `SkipList`). Its paths act like `excludes`;
+    /// its bundle identifiers skip matching apps wherever they are.
+    public var skipList = SkipList()
+    /// Why the skip list file could not be read. Every app is then refused:
+    /// an unreadable list never means "nothing excluded".
+    public var skipListProblem: String?
+    /// Where to look for Intel-only audio plugins (`AdvisoryPolicy`). Nil
+    /// means the standard folders, the user's own under that user's home.
+    public var pluginFolders: [URL]? = nil
+    /// The user's allow list (see `AllowListFile`). When it has entries,
+    /// only the apps it names are thinned.
+    public var allowList = SkipList()
+    /// Why the allow list file could not be read. Every app is then refused.
+    public var allowListProblem: String?
+    /// Where the allow list was read from, for the report.
+    public var allowListPath: String?
+
+    /// Loads the allow list at `url`; a missing file is an empty list, which
+    /// allows every app.
+    public mutating func loadAllowList(_ url: URL) {
+        allowListPath = url.path
+        do {
+            allowList = try SkipList.load(url, home: SkipList.home(of: homeOwner ?? geteuid()))
+        } catch {
+            allowListProblem = error.description
+        }
+    }
+
+    /// Loads the skip list at `url` into these options; a missing file is an
+    /// empty list.
+    public mutating func loadSkipList(_ url: URL) {
+        do {
+            skipList = try SkipList.load(url, home: SkipList.home(of: homeOwner ?? geteuid()))
+        } catch {
+            skipListProblem = error.description
+        }
+    }
 
     public init(excludes: [URL] = [], launchServicesPreferences: URL? = nil) {
+        self.init(excludes: excludes, launchServicesPreferences: launchServicesPreferences,
+                  defaultUser: RosettaFlags.defaultPreferencesUser())
+    }
+
+    init(excludes: [URL] = [], launchServicesPreferences: URL?, defaultUser: Result<uid_t, Problem>) {
         self.excludes = excludes
-        self.launchServicesPreferences = launchServicesPreferences ?? RosettaFlags.defaultPreferences()
+        if case let .success(uid) = defaultUser { homeOwner = uid }
+        if let launchServicesPreferences {
+            self.launchServicesPreferences = launchServicesPreferences
+            return
+        }
+        switch defaultUser {
+        case let .success(uid):
+            self.launchServicesPreferences = RosettaFlags.preferences(of: uid)
+            preferencesOwner = uid
+        case let .failure(problem):
+            self.launchServicesPreferences = RosettaFlags.preferences(of: geteuid())
+            preferencesProblem = problem.description
+        }
     }
 }
 
@@ -33,6 +99,9 @@ public struct AppScan: Equatable, Sendable {
     /// Paths in the app that could not be read, relative to the app. An app
     /// with issues was scanned incompletely; its counts are lower bounds.
     public let issues: [WalkIssue]
+    /// Code in the app with an Intel slice and no arm64 slice, relative to
+    /// the app. Any of it but Node modules skips the app (`intelOnlyCode`).
+    public var intelOnlyCode: [String] = []
 
     public var universalCount: Int { files.count }
     /// Files that pass every file-level rule. Zero when the app is skipped.
@@ -76,6 +145,12 @@ public struct ScanResult: Equatable, Sendable {
     /// Exclusions naming nothing on disk. They match nothing.
     public var missingExclusions: [String] = []
     public var rosetta: RosettaStatus
+    /// Intel-only plugins outside every app, which thinned hosts cannot load.
+    /// A warning only; it skips nothing.
+    public var plugins = PluginReport()
+    /// The allow list in force, or nil when there is none (every app may be
+    /// thinned).
+    public var allowList: AllowListStatus?
 
     /// True when every directory that should be searched was, and every app
     /// read in full.
@@ -106,16 +181,37 @@ public struct ScanResult: Equatable, Sendable {
 /// Each app is then checked, and skipped whole for the first reason that
 /// applies: protected location, user exclusion, unreadable metadata,
 /// script-only, "Open using Rosetta", a main executable without an arm64
-/// slice, an `LSArchitecturePriority` that does not select arm64,
+/// slice, an `LSArchitecturePriority` that does not select arm64, Intel-only
+/// code anywhere in the bundle,
 /// and, if any file is eligible, failing `codesign --verify`.
+/// One app about to be read: its relative path and its 1-based position
+/// among the apps that will be read. Apps skipped before reading (excluded or
+/// protected) are not counted.
+public struct ScanProgress: Codable, Equatable, Sendable {
+    public let app: String
+    public let index: Int
+    public let total: Int
+}
+
 public enum AppScanner {
     /// `progress` is called with each app's relative path before it is read.
     public static func scan(_ root: URL, options: ScanOptions = ScanOptions(),
-                            progress: (String) -> Void = { _ in }) -> ScanResult {
-        let scan = Scan(rosetta: RosettaFlags(preferences: options.launchServicesPreferences),
-                        exclusions: Exclusions(options.excludes))
+                            progress: (ScanProgress) -> Void = { _ in }) -> ScanResult {
+        let scan = Scan(rosetta: RosettaFlags(preferences: options.launchServicesPreferences,
+                                              owner: options.preferencesOwner, problem: options.preferencesProblem),
+                        exclusions: Exclusions(options.excludes + options.skipList.paths.map { URL(filePath: $0) }),
+                        skipList: options.skipList, skipListProblem: options.skipListProblem,
+                        allowList: options.allowList, allowListProblem: options.allowListProblem,
+                        allowed: Exclusions(options.allowList.paths.map { URL(filePath: $0) }))
         var result = ScanResult(rosetta: scan.rosetta.status)
         result.missingExclusions = scan.exclusions.missing
+        if options.allowListProblem != nil || !options.allowList.isEmpty {
+            result.allowList = AllowListStatus(path: options.allowListPath, entries: options.allowList.paths.count
+                + options.allowList.bundleIdentifiers.count, problem: options.allowListProblem,
+                missingPaths: scan.allowed.missing)
+        }
+        result.plugins = AdvisoryPolicy.plugins(in: options.pluginFolders
+            ?? AdvisoryPolicy.pluginFolders(home: SkipList.home(of: options.homeOwner ?? geteuid())))
 
         let tree: FileTree
         do {
@@ -139,7 +235,7 @@ public enum AppScanner {
 
         if isApp(root.lastPathComponent) {
             let name = root.lastPathComponent
-            progress(name)
+            progress(ScanProgress(app: name, index: 1, total: 1))
             result.apps = [rootSkip.map { .skipped(root, name, $0) } ?? scan.app(root, real: rootReal, relativePath: name)]
             return result
         }
@@ -150,12 +246,15 @@ public enum AppScanner {
 
         var found: [(path: [String], skip: AppSkipReason?)] = []
         scan.discover(in: tree, at: [], rootReal: rootReal, apps: &found, result: &result)
+        let total = found.count(where: { $0.skip == nil })
+        var index = 0
         result.apps = found
             .map { app in
                 let relative = app.path.joined(separator: "/")
                 let url = root.appending(path: relative)
                 if let skip = app.skip { return .skipped(url, relative, skip) }
-                progress(relative)
+                index += 1
+                progress(ScanProgress(app: relative, index: index, total: total))
                 return scan.app(url, real: join(rootReal, relative), relativePath: relative)
             }
             .sorted { $0.relativePath < $1.relativePath }
@@ -221,9 +320,33 @@ public enum AppScanner {
         base == "/" ? "/\(relative)" : "\(base)/\(relative)"
     }
 
+    /// A Node native module (`.node`) loads only into a Node runtime of its
+    /// own architecture. Universal Electron apps ship Intel-only ones beside
+    /// the arm64 ones; once the app's executables are thinned, no Intel
+    /// runtime is left to load them, so they do not skip the app (decided
+    /// 2026-10-05). An Intel-only executable that could host one still does.
+    static func isNodeModule(_ path: String) -> Bool {
+        path.hasSuffix(".node")
+    }
+
     private struct Scan {
         let rosetta: RosettaFlags
         let exclusions: Exclusions
+        let skipList: SkipList
+        let skipListProblem: String?
+        let allowList: SkipList
+        let allowListProblem: String?
+        /// The allow list's paths, matched by identity like exclusions.
+        let allowed: Exclusions
+
+        /// Whether the allow list names the app at `real`: by its bundle
+        /// identifier, or by its path or a folder above it.
+        func isAllowed(_ real: String, bundleIdentifier: String?) -> Bool {
+            if let bundleIdentifier, allowList.bundleIdentifiers.contains(bundleIdentifier) { return true }
+            return (ancestors(of: real) + [real]).contains { path in
+                FileID(path: path).flatMap(allowed.exclusion(for:)) != nil
+            }
+        }
 
         /// Skips decided from the path alone, before anything is read.
         func skipBeforeReading(_ realPath: String) -> AppSkipReason? {
@@ -249,6 +372,12 @@ public enum AppScanner {
             if let id = FileID(path: real), let exclusion = exclusions.exclusion(below: id) {
                 return .skipped(url, relativePath, .containsExclusion(exclusion))
             }
+            if let skipListProblem {
+                return .skipped(url, relativePath, .skipListUnreadable(skipListProblem))
+            }
+            if let allowListProblem {
+                return .skipped(url, relativePath, .allowListUnreadable(allowListProblem))
+            }
 
             let classified = BundleClassifier.classify(url)
             var bundleIdentifier: String?
@@ -257,7 +386,11 @@ public enum AppScanner {
                 let tree = try FileTree(url)
                 let info = try AppInfo(tree: tree)
                 bundleIdentifier = info.bundleIdentifier
-                if let reason = try info.scriptOnlyReason(tree: tree) {
+                if let id = info.bundleIdentifier, skipList.bundleIdentifiers.contains(id) {
+                    skip = .skipListed(id)
+                } else if !allowList.isEmpty, !isAllowed(real, bundleIdentifier: info.bundleIdentifier) {
+                    skip = .notOnAllowList
+                } else if let reason = try info.scriptOnlyReason(tree: tree) {
                     skip = .scriptOnly(reason)
                 } else if case let .inconclusive(detail) = rosetta.flag(for: info.bundleIdentifier) {
                     skip = .rosettaInconclusive(detail)
@@ -273,17 +406,24 @@ public enum AppScanner {
                         // Only the ordinary arm64 slice is known to launch natively;
                         // an unmatched list is unmeasured, so it skips too.
                         skip = .intelArchitecturePriority(priority)
+                    } else if case let blocking = classified.intelOnlyCode.filter({ !AppScanner.isNodeModule($0) }), !blocking.isEmpty {
+                        skip = .intelOnlyCode(blocking)
+                    } else {
+                        // Advisory defaults last, so a hard reason is always the
+                        // one reported; a future override then lifts only these.
+                        skip = try AdvisoryPolicy.skip(tree)
                     }
                 }
             } catch {
                 skip = .bundleMetadata(error.description)
             }
             // Slow on large apps, so only where something could be thinned.
+            // An advisory skip leaves it out; apply rechecks it in full.
             if skip == nil, classified.files.contains(where: \.isEligible), let problem = Codesign.verify(url) {
                 skip = .signatureInvalid(problem)
             }
             return AppScan(relativePath: relativePath, url: url, bundleIdentifier: bundleIdentifier, skip: skip,
-                           files: classified.files, issues: classified.issues)
+                           files: classified.files, issues: classified.issues, intelOnlyCode: classified.intelOnlyCode)
         }
     }
 }
@@ -293,4 +433,14 @@ extension AppScan {
     static func skipped(_ url: URL, _ relativePath: String, _ reason: AppSkipReason) -> AppScan {
         AppScan(relativePath: relativePath, url: url, bundleIdentifier: nil, skip: reason, files: [], issues: [])
     }
+}
+
+/// The allow list a scan applied.
+public struct AllowListStatus: Codable, Equatable, Sendable {
+    public let path: String?
+    public let entries: Int
+    /// Why it could not be read; every app is then refused.
+    public let problem: String?
+    /// Path entries that name nothing on disk. They allow nothing.
+    public let missingPaths: [String]
 }

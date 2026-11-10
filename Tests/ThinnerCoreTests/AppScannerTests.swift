@@ -18,24 +18,29 @@ func hermeticOptions(excludes: [URL] = []) -> ScanOptions {
 
         // Loose files in macho/ and java/ belong to no app; helper apps are
         // part of the app that contains them; Multi.framework is not an app.
-        #expect(result.apps.map(\.relativePath) == ["bundles/Electron.app", "bundles/Nested.app", "bundles/Signed.app"])
+        #expect(result.apps.map(\.relativePath) == ["bundles/Electron.app", "bundles/Nested.app", "bundles/RunningHelper.app", "bundles/Signed.app"])
 
-        #expect(result.apps.allSatisfy { $0.skip == nil })
+        // Nested.app holds libraries with Intel slices and no arm64 slice, so
+        // it is skipped whole. Electron.app's Intel-only Node prebuild is
+        // listed but does not skip it.
+        #expect(result.apps.map(\.skip) == [nil, .intelOnlyCode(["Contents/Frameworks/libarm64e.dylib",
+                                                                 "Contents/Frameworks/libintel.dylib"]), nil, nil])
+        #expect(result.apps[0].intelOnlyCode == ["Contents/Resources/app.asar.unpacked/node_modules/pty/prebuilds/darwin-x64/pty.node"])
         #expect(result.skippedPaths.isEmpty)
         let counts = result.apps.map { [$0.universalCount, $0.eligibleCount] }
-        #expect(counts == [[14, 9], [7, 3], [4, 3]])
+        #expect(counts == [[14, 9], [7, 0], [1, 1], [4, 3]])
 
-        for app in result.apps {
+        for app in result.apps where app.skip == nil {
             #expect(app.removableBytes == app.files.reduce(0) { $0 + $1.decision.savedBytes })
             #expect(app.removableBytes > 0)
             #expect(app.url.lastPathComponent == URL(filePath: app.relativePath).lastPathComponent)
         }
 
         let totals = result.totals
-        #expect(totals.apps == 3)
-        #expect(totals.skippedApps == 0)
-        #expect(totals.universalFiles == 25)
-        #expect(totals.eligibleFiles == 15)
+        #expect(totals.apps == 4)
+        #expect(totals.skippedApps == 1)
+        #expect(totals.universalFiles == 26)
+        #expect(totals.eligibleFiles == 13)
         #expect(totals.removableBytes == result.apps.reduce(0) { $0 + $1.removableBytes })
         #expect(totals.issues == 0)
     }

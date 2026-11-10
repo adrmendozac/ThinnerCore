@@ -14,7 +14,7 @@ import ThinnerCore
         let json = try report.json()
         let decoded = try JSONDecoder().decode(ScanReport.self, from: Data(json.utf8))
         #expect(decoded == report)
-        #expect(decoded.schemaVersion == 3)
+        #expect(decoded.schemaVersion == 5)
         #expect(decoded.dryRun)
         #expect(decoded.complete)
     }
@@ -27,8 +27,9 @@ import ThinnerCore
         #expect(report.totals.removableBytes == report.apps.reduce(0) { $0 + $1.removableBytes })
         for app in report.apps {
             #expect(app.universalFiles == app.files.count)
-            #expect(app.eligibleFiles == app.files.count(where: \.eligible))
-            #expect(app.removableBytes == app.files.reduce(0) { $0 + $1.savedBytes })
+            // A skipped app counts nothing, whatever its files would allow.
+            #expect(app.eligibleFiles == (app.skip == nil ? app.files.count(where: \.eligible) : 0))
+            #expect(app.removableBytes == (app.skip == nil ? app.files.reduce(0) { $0 + $1.savedBytes } : 0))
         }
     }
 
@@ -68,12 +69,33 @@ import ThinnerCore
         let report = try fixtureReport()
         let text = TextReport.render(report)
         let totals = report.totals
-        #expect(text.contains("Total: \(totals.apps) apps · \(totals.universalFiles) universal files · \(totals.eligibleFiles) eligible"))
+        #expect(text.contains("Total: \(totals.apps) apps (\(totals.skippedApps) skipped) · \(totals.universalFiles) universal files · \(totals.eligibleFiles) eligible"))
         #expect(text.contains("dry run: nothing on disk was changed"))
         #expect(!text.contains("Incomplete scan"))
-        for app in report.apps {
+        for app in report.apps where app.skip == nil {
             #expect(text.contains("\(app.universalFiles) universal · \(app.eligibleFiles) eligible"))
         }
+    }
+
+    @Test func signatureDiagnosticsAreAvailableOnlyInDetailedTextAndJSON() throws {
+        // Change only a generated fixture's report; never inspect an installed app.
+        let report = try fixtureReport()
+        var object = try #require(JSONSerialization.jsonObject(with: Data(report.json().utf8)) as? [String: Any])
+        var apps = try #require(object["apps"] as? [[String: Any]])
+        #expect(!apps.isEmpty)
+        let detail = "fails code signature verification: resource fork, Finder information, or similar detritus not allowed; In subcomponent: /fixtures/Example.app/Contents/Helpers/loader"
+        apps[0]["skip"] = ["code": "signatureInvalid", "detail": detail]
+        apps[0]["eligibleFiles"] = 0
+        apps[0]["removableBytes"] = 0
+        object["apps"] = apps
+        let changed = try JSONDecoder().decode(ScanReport.self, from: JSONSerialization.data(withJSONObject: object))
+        let normal = TextReport.render(changed)
+        #expect(normal.contains("Signature check failed. This app was left unchanged."))
+        #expect(!normal.contains("resource fork"))
+        #expect(!normal.contains("In subcomponent:"))
+        #expect(TextReport.render(changed, verbose: true).contains(detail))
+        let decoded = try JSONDecoder().decode(ScanReport.self, from: Data(changed.json().utf8))
+        #expect(decoded.apps[0].skip?.detail == detail)
     }
 
     @Test func reasonCodesAreDistinct() {

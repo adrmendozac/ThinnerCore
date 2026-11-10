@@ -10,7 +10,7 @@ import Foundation
 /// fields are omitted when absent. Bump `currentSchemaVersion` on any change
 /// a consumer could notice.
 public struct ScanReport: Codable, Equatable, Sendable {
-    public static let currentSchemaVersion = 3
+    public static let currentSchemaVersion = 5
 
     public struct Tool: Codable, Equatable, Sendable {
         public let name: String
@@ -21,6 +21,10 @@ public struct ScanReport: Codable, Equatable, Sendable {
     public struct Reason: Codable, Equatable, Sendable {
         public let code: String
         public let detail: String
+        /// True for a Phase 7 advisory default (`AppSkipReason.isAdvisory`),
+        /// the only kind a future force option could lift; omitted otherwise.
+        /// Schema 5.
+        public var advisory: Bool? = nil
     }
 
     public struct Rosetta: Codable, Equatable, Sendable {
@@ -65,6 +69,9 @@ public struct ScanReport: Codable, Equatable, Sendable {
         public let files: [File]
         /// Paths in the app that could not be read, relative to the app.
         public let issues: [Issue]
+        /// Code with an Intel slice and no arm64 slice, relative to the app;
+        /// omitted when there is none. Schema 4.
+        public let intelOnlyCode: [String]?
     }
 
     public struct SkippedPath: Codable, Equatable, Sendable {
@@ -100,6 +107,12 @@ public struct ScanReport: Codable, Equatable, Sendable {
     public let skippedPaths: [SkippedPath]
     /// Paths that could not be searched for apps, relative to the root.
     public let issues: [Issue]
+    /// Intel-only Audio Unit, VST, and VST3 plugins outside every app. Hosts
+    /// that are thinned can no longer load them. A warning; skips nothing.
+    /// Schema 5.
+    public let plugins: PluginReport
+    /// The allow list in force; omitted when there is none. Schema 5.
+    public let allowList: AllowListStatus?
 
     public init(root: URL, excludes: [URL], result: ScanResult) {
         schemaVersion = Self.currentSchemaVersion
@@ -129,17 +142,20 @@ public struct ScanReport: Codable, Equatable, Sendable {
         apps = result.apps.map { app in
             App(path: app.relativePath,
                 bundleIdentifier: app.bundleIdentifier,
-                skip: app.skip.map { Reason(code: $0.code, detail: $0.description) },
+                skip: app.skip.map { Reason(code: $0.code, detail: $0.description, advisory: $0.isAdvisory ? true : nil) },
                 universalFiles: app.universalCount,
                 eligibleFiles: app.eligibleCount,
                 removableBytes: app.removableBytes,
                 files: app.files.map(File.init),
-                issues: app.issues.map(Issue.init))
+                issues: app.issues.map(Issue.init),
+                intelOnlyCode: app.intelOnlyCode.isEmpty ? nil : app.intelOnlyCode)
         }
         skippedPaths = result.skippedPaths.map {
             SkippedPath(path: $0.relativePath, reason: Reason(code: $0.reason.code, detail: $0.reason.description))
         }
         issues = result.issues.map(Issue.init)
+        plugins = result.plugins
+        allowList = result.allowList
     }
 
     /// Pretty-printed with sorted keys, so equal reports print identically.

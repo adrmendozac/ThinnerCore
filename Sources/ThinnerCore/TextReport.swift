@@ -13,6 +13,29 @@ public enum TextReport {
         for path in report.missingExclusions {
             lines.append("Warning: excluded path not found, so it excludes nothing: \(path)")
         }
+        if let allow = report.allowList {
+            if let problem = allow.problem {
+                lines.append("Warning: the allow list cannot be read, so every app is refused: \(problem)")
+            } else {
+                lines.append("Allow list: only its \(allow.entries == 1 ? "1 entry" : "\(allow.entries) entries") can be thinned"
+                    + (allow.path.map { " (\($0))" } ?? ""))
+            }
+            for path in allow.missingPaths {
+                lines.append("Warning: allow list path not found, so it allows nothing: \(path)")
+            }
+        }
+        if !report.plugins.intelOnly.isEmpty {
+            let plugins = report.plugins.intelOnly.count
+            lines.append("Warning: \(count(plugins, "Intel-only audio plugin")) \(plugins == 1 ? "runs" : "run") only under Rosetta;"
+                + " an app that hosts them can no longer load them once thinned. Put such hosts on the skip list"
+                + " (thinnercore skip add <app>):")
+            lines += report.plugins.intelOnly.map { "  \($0)" }
+        }
+        if !report.plugins.uninspected.isEmpty {
+            lines.append("Warning: \(count(report.plugins.uninspected.count, "audio plugin path")) could not be inspected"
+                + " and may be Intel-only:")
+            lines += report.plugins.uninspected.map { "  \($0)" }
+        }
 
         let totals = report.totals
         let skipped = totals.skippedApps > 0 ? " (\(totals.skippedApps) skipped)" : ""
@@ -70,7 +93,7 @@ public enum TextReport {
             lines.append("Journal inspection incomplete: \(count(report.pendingOperations.problems.count, "problem")); see recovery details above.")
         }
         if report.complete { lines.append("Scan complete. No files changed.") }
-        if !verbose && !report.apps.isEmpty { lines.append("Use --verbose for file decisions or --json for structured output.") }
+        if !verbose && !report.apps.isEmpty { lines.append("Use --verbose for technical details and file decisions or --json for structured output.") }
         return lines.map { line in
             let clean = TerminalText.sanitize(line)
             guard color else { return clean }
@@ -88,7 +111,7 @@ public enum TextReport {
     private static func app(_ app: ScanReport.App, verbose: Bool) -> [String] {
         var lines: [String] = []
         if let skip = app.skip {
-            lines.append("skipped: \(skip.detail)")
+            lines.append("skipped: \(verbose ? skip.detail : appSkipSummary(skip))")
             let wouldBe = app.files.count(where: \.eligible)
             if wouldBe > 0 {
                 lines.append("\(count(app.universalFiles, "universal file")); \(wouldBe) would otherwise be eligible")
@@ -107,6 +130,9 @@ public enum TextReport {
             }
         }
         if verbose {
+            for path in app.intelOnlyCode ?? [] {
+                lines.append("  intel-only \(path)")
+            }
             for file in app.files {
                 if let skip = file.skip {
                     lines.append("  skip      \(file.path): \(skip.detail)")
@@ -117,6 +143,30 @@ public enum TextReport {
             }
         }
         return lines
+    }
+
+    // Presentation only: preserve the complete diagnostic in verbose and JSON reports.
+    private static func appSkipSummary(_ reason: ScanReport.Reason) -> String {
+        switch reason.code {
+        case "protectedLocation": "Protected location. This app cannot be changed."
+        case "excluded": "Excluded by your settings."
+        case "containsExclusion": "Contains an excluded item. The whole app was left unchanged."
+        case "bundleMetadata": "App information could not be verified. This app was left unchanged."
+        case "scriptOnly": "Script-based app. There is no executable to thin."
+        case "rosettaFlagged": "Set to open using Rosetta. Intel support was kept."
+        case "rosettaInconclusive": "Rosetta settings could not be checked. Intel support was kept."
+        case "noNativeMainExecutable": "The main executable has no standard Apple Silicon version. Intel support was kept."
+        case "intelArchitecturePriority": "This app does not prefer standard Apple Silicon execution. It was left unchanged."
+        case "intelOnlyCode": "Contains components that require Intel support. This app was left unchanged."
+        case "skipListed": "On your skip list."
+        case "skipListUnreadable": "Your skip list could not be read. Check access to the skip list file."
+        case "notOnAllowList": "Not on your allow list."
+        case "allowListUnreadable": "Your allow list could not be read. Check access to the allow list file."
+        case "masApp": "Mac App Store app. Left unchanged by default."
+        case "embedsSystemExtension": "Includes a system extension, as VPN and security software does. Left unchanged by default."
+        case "signatureInvalid": "Signature check failed. This app was left unchanged."
+        default: reason.detail
+        }
     }
 
     private static func rosetta(_ rosetta: ScanReport.Rosetta) -> String {
@@ -140,6 +190,7 @@ public enum TextReport {
         case "noIntel": "without Intel"
         case "noSavings": "with nothing to save"
         case "hardLinked": "hard-linked"
+        case "fileFlags": "with file flags"
         case "sealedAsData": "sealed as data"
         case "unsealed": "not sealed as code"
         case "signatureMetadata": "with unreadable signature metadata"

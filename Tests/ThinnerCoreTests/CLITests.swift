@@ -25,9 +25,58 @@ import Testing
         try? FileManager.default.removeItem(at: dir)
     }
 
-    /// Hermetic: never reads the real user's Rosetta settings.
+    private var skipList: String { dir.appending(path: "skip-list.txt").path }
+    private var allowList: String { dir.appending(path: "allow-list.txt").path }
+
+    /// Hermetic: never reads the real user's Rosetta settings, skip list, or
+    /// allow list.
     private func thinner(_ arguments: String...) throws -> Shell.Result {
-        try Shell.run(Self.binary.path, arguments: arguments + ["--rosetta-preferences", prefs])
+        try Shell.run(Self.binary.path, arguments: arguments
+            + ["--rosetta-preferences", prefs, "--skip-list", skipList, "--allow-list", allowList])
+    }
+
+    @Test func allowCommandEditsTheListAndScansHonorIt() throws {
+        defer { cleanUp() }
+        let bundles = try Fixtures.url("bundles").path
+        let id = "dev.thinner.fixture.signed"
+        let empty = try Shell.run(Self.binary.path, "allow", "list", "--allow-list", allowList)
+        #expect(empty.output.contains("every app can be thinned"))
+        #expect(try Shell.run(Self.binary.path, "allow", "add", id, "--allow-list", allowList).status == 0)
+        #expect(try String(contentsOfFile: allowList, encoding: .utf8).hasPrefix("# thinnercore allow list"))
+
+        let run = try thinner("scan", bundles, "--json")
+        let report = try JSONDecoder().decode(ScanReport.self, from: Data(run.output.utf8))
+        let byID = Dictionary(report.apps.map { ($0.bundleIdentifier ?? $0.path, $0.skip?.code) }) { first, _ in first }
+        #expect(byID[id] != "notOnAllowList", "the listed app is allowed")
+        #expect(report.apps.filter { $0.bundleIdentifier != id }.allSatisfy { $0.skip != nil }, "every other app is skipped")
+        #expect(report.apps.contains { $0.skip?.code == "notOnAllowList" })
+        #expect(report.allowList?.entries == 1)
+        #expect(try thinner("scan", bundles).output.contains("Allow list: only its 1 entry can be thinned"))
+
+        #expect(try Shell.run(Self.binary.path, "allow", "remove", id, "--allow-list", allowList).status == 0)
+        let after = try JSONDecoder().decode(ScanReport.self, from: Data(try thinner("scan", bundles, "--json").output.utf8))
+        #expect(!after.apps.contains { $0.skip?.code == "notOnAllowList" }, "an emptied list allows every app")
+        #expect(after.allowList == nil)
+    }
+
+    @Test func skipCommandEditsTheListAndScansHonorIt() throws {
+        defer { cleanUp() }
+        let signed = try Fixtures.url("bundles/Signed.app").path
+        let id = "dev.thinner.fixture.signed"
+        #expect(try Shell.run(Self.binary.path, "skip", "add", id, "--skip-list", skipList).status == 0)
+        let again = try Shell.run(Self.binary.path, "skip", "add", id, "--skip-list", skipList)
+        #expect(again.output.contains("Already listed"))
+        let list = try Shell.run(Self.binary.path, "skip", "list", "--json", "--skip-list", skipList)
+        #expect(list.output.contains(id))
+
+        let run = try thinner("scan", signed, "--json")
+        let report = try JSONDecoder().decode(ScanReport.self, from: Data(run.output.utf8))
+        #expect(report.apps.first?.skip?.code == "skipListed")
+
+        #expect(try Shell.run(Self.binary.path, "skip", "remove", id, "--skip-list", skipList).status == 0)
+        #expect(try Shell.run(Self.binary.path, "skip", "remove", id, "--skip-list", skipList).status == 1)
+        let after = try thinner("scan", signed, "--json")
+        #expect(try JSONDecoder().decode(ScanReport.self, from: Data(after.output.utf8)).apps.first?.skip == nil)
     }
 
     @Test func jsonScanOfTheFixturesExitsZero() throws {
@@ -36,10 +85,37 @@ import Testing
         #expect(run.status == 0, "\(run.output)")
         let report = try JSONDecoder().decode(ScanReport.self, from: Data(run.output.utf8))
         #expect(report.complete)
-        #expect(report.totals.apps == 3)
-        #expect(report.totals.universalFiles == 25)
-        #expect(report.totals.eligibleFiles == 15)
+        #expect(report.totals.apps == 4)
+        #expect(report.totals.universalFiles == 26)
+        #expect(report.totals.eligibleFiles == 13)
         #expect(report.rosetta.preferencesPath == prefs)
+    }
+
+    /// The Ink front end pipes stderr and asks for machine-readable progress;
+    /// stdout must stay a clean JSON report.
+    @Test func jsonProgressGoesToStderrOnly() throws {
+        defer { cleanUp() }
+        let process = Process()
+        process.executableURL = Self.binary
+        process.arguments = ["scan", try Fixtures.url("bundles").path, "--json", "--rosetta-preferences", prefs, "--skip-list", skipList, "--allow-list", allowList]
+        process.environment = ProcessInfo.processInfo.environment.merging(["THINNERCORE_PROGRESS": "json"]) { $1 }
+        let stdout = Pipe(), stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+        try process.run()
+        let out = stdout.fileHandleForReading.readDataToEndOfFile()
+        let err = stderr.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        #expect(process.terminationStatus == 0)
+
+        let report = try JSONDecoder().decode(ScanReport.self, from: out)
+        struct Line: Decodable { let progress: ScanProgress }
+        let lines = String(decoding: err, as: UTF8.self).split(separator: "\n")
+            .filter { !$0.hasPrefix("WARNING") } // development gate banner, if enabled
+        let progress = try lines.map { try JSONDecoder().decode(Line.self, from: Data($0.utf8)).progress }
+        #expect(progress.map(\.index) == Array(1...report.apps.count))
+        #expect(progress.allSatisfy { $0.total == report.apps.count })
+        #expect(progress.map(\.app) == report.apps.map(\.path))
     }
 
     @Test func humanAndJSONReportsAgree() throws {
@@ -49,7 +125,7 @@ import Testing
         let text = try thinner("scan", root)
         #expect(json.status == 0 && text.status == 0)
         let report = try JSONDecoder().decode(ScanReport.self, from: Data(json.output.utf8))
-        #expect(text.output.contains("Total: \(report.totals.apps) apps · \(report.totals.universalFiles) universal files"
+        #expect(text.output.contains("Total: \(report.totals.apps) apps (\(report.totals.skippedApps) skipped) · \(report.totals.universalFiles) universal files"
             + " · \(report.totals.eligibleFiles) eligible"))
     }
 
