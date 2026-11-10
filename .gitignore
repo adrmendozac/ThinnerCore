@@ -3,6 +3,7 @@
 
 # Swift Package Manager
 .build/
+.build-dev/
 .swiftpm/
 
 # Xcode
@@ -18,6 +19,8 @@ DerivedData/
 /AGENTS.md
 /CLAUDE.md
 /PLAN.md
+*.md
+!README.md
 
 # Node / Ink frontend
 node_modules/
